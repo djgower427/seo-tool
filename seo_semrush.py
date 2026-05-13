@@ -20,6 +20,40 @@ def _redact(text: str) -> str:
     return _KEY_RE.sub(r"\1***", text)
 
 
+# Some endpoints (notably domain_rank_history) ignore `export_columns` and
+# return full English headers instead of the short codes. Normalize back to
+# short codes so the rest of the code can rely on a single naming scheme.
+_HEADER_ALIASES = {
+    "Rank": "Rk",
+    "Organic Keywords": "Or",
+    "Organic Traffic": "Ot",
+    "Organic Cost": "Oc",
+    "Adwords Keywords": "Ad",
+    "Adwords Traffic": "At",
+    "Adwords Cost": "Ac",
+    "Date": "Dt",
+    "Domain": "Dn",
+    "Database": "Db",
+    "Keyword": "Ph",
+    "Position": "Po",
+    "Previous Position": "Pp",
+    "Position Difference": "Pd",
+    "Search Volume": "Nq",
+    "CPC": "Cp",
+    "URL": "Ur",
+    "Traffic (%)": "Tr",
+    "Traffic Cost (%)": "Tc",
+    "Competition": "Co",
+    "Number of Results": "Nr",
+    "Trends": "Td",
+    "Keyword Difficulty": "Kd",
+}
+
+
+def _normalize_headers(header: list[str]) -> list[str]:
+    return [_HEADER_ALIASES.get(h.strip(), h.strip()) for h in header]
+
+
 class SemrushError(Exception):
     """Raised when Semrush returns an ERROR response or empty data."""
 
@@ -51,7 +85,7 @@ def _request(params: dict[str, str]) -> list[dict[str, str]]:
     if not text:
         return []
     lines = text.splitlines()
-    header = lines[0].split(";")
+    header = _normalize_headers(lines[0].split(";"))
     return [dict(zip(header, line.split(";"))) for line in lines[1:]]
 
 
