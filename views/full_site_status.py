@@ -74,12 +74,32 @@ def render_overview(overview: dict[str, str]) -> None:
     cols[3].metric("Est. traffic value", f"${_to_int(overview.get('Oc')):,}")
 
 
+def _missing_cols_warning(df: pd.DataFrame, expected: list[str], label: str) -> bool:
+    """If any expected columns are absent, render an inline warning + the raw frame.
+
+    Returns True when columns are missing (caller should bail).
+    """
+    missing = [c for c in expected if c not in df.columns]
+    if not missing:
+        return False
+    st.warning(
+        f"{label}: Semrush response is missing expected column(s) {missing}. "
+        f"Columns returned: {list(df.columns)}"
+    )
+    with st.expander("Raw response"):
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    return True
+
+
 def render_history(rows: list[dict[str, str]]) -> None:
     if not rows:
         st.info("No historical data returned for this domain.")
         return
 
     df = pd.DataFrame(rows)
+    if _missing_cols_warning(df, ["Dt", "Ot", "Or"], "Traffic history"):
+        return
+
     df["Date"] = pd.to_datetime(df["Dt"], format="%Y%m%d", errors="coerce")
     df["Organic traffic"] = df["Ot"].apply(_to_int)
     df["Organic keywords"] = df["Or"].apply(_to_int)
@@ -92,7 +112,7 @@ def render_history(rows: list[dict[str, str]]) -> None:
         st.line_chart(df.set_index("Date")["Organic keywords"], height=320)
 
 
-def render_top_pages(rows: list[dict[str, str]]) -> None:
+def render_top_pages(rows: list[dict]) -> None:
     if not rows:
         st.info("No top pages returned for this domain.")
         return
@@ -100,12 +120,15 @@ def render_top_pages(rows: list[dict[str, str]]) -> None:
         [
             {
                 "URL": r.get("Ur", ""),
-                "Keywords": _to_int(r.get("Pc")),
-                "Est. traffic": _to_int(r.get("Tg")),
-                "Est. traffic value": _to_float(r.get("Tc")),
+                "Keywords": int(r.get("Keywords", 0)),
+                "Traffic share (%)": float(r.get("TrafficShare", 0.0)),
             }
             for r in rows
         ]
+    )
+    st.caption(
+        "Pages ranked by the share of the domain's estimated organic traffic "
+        "they capture across their ranking keywords."
     )
     st.dataframe(
         df,
@@ -113,7 +136,7 @@ def render_top_pages(rows: list[dict[str, str]]) -> None:
         hide_index=True,
         column_config={
             "URL": st.column_config.LinkColumn("URL"),
-            "Est. traffic value": st.column_config.NumberColumn(format="$%.0f"),
+            "Traffic share (%)": st.column_config.NumberColumn(format="%.2f%%"),
         },
     )
     st.download_button(
@@ -178,7 +201,7 @@ def render() -> None:
         render_history(history)
 
     if pages is not None:
-        st.subheader(f"Top {len(pages)} pages by estimated organic traffic")
+        st.subheader(f"Top {len(pages)} pages by organic traffic share")
         render_top_pages(pages)
 
 

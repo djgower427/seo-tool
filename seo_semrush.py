@@ -74,7 +74,9 @@ def domain_rank_history(
 ) -> list[dict[str, str]]:
     """Monthly history of rank, organic keywords, organic traffic, organic cost.
 
-    `Dt` comes back as YYYYMMDD.
+    `Dt` comes back as YYYYMMDD. We don't pass display_sort because dt_desc
+    isn't a documented value for this endpoint; Semrush returns history in
+    reverse-chronological order by default.
     """
     return _request(
         {
@@ -84,26 +86,45 @@ def domain_rank_history(
             "database": database,
             "export_columns": "Rk,Or,Ot,Oc,Dt",
             "display_limit": str(limit),
-            "display_sort": "dt_desc",
         }
     )
 
 
 def top_pages(
-    domain: str, database: str, api_key: str, limit: int = 25
+    domain: str, database: str, api_key: str, limit: int = 25, keyword_pool: int = 500
 ) -> list[dict[str, str]]:
-    """Top pages by estimated organic traffic.
+    """Top pages by estimated organic traffic share.
 
-    Columns: Ur (URL), Pc (# keywords), Tg (traffic), Tc (traffic cost).
+    Semrush's standard Domain Analytics API has no direct "top pages" endpoint
+    (that's part of the separate Trends API). We approximate it by pulling the
+    top `keyword_pool` organic keywords for the domain and aggregating by URL:
+    each page's score is the sum of `Tr` (traffic share %) across its ranking
+    keywords. Returns the top `limit` URLs sorted by traffic share.
     """
-    return _request(
+    rows = _request(
         {
-            "type": "domain_organic_pages",
+            "type": "domain_organic",
             "key": api_key,
             "domain": domain,
             "database": database,
-            "export_columns": "Ur,Pc,Tg,Tc",
-            "display_limit": str(limit),
-            "display_sort": "tg_desc",
+            "export_columns": "Ph,Po,Nq,Ur,Tr",
+            "display_limit": str(keyword_pool),
+            "display_sort": "tr_desc",
         }
     )
+
+    by_url: dict[str, dict] = {}
+    for r in rows:
+        url = r.get("Ur", "").strip()
+        if not url:
+            continue
+        agg = by_url.setdefault(
+            url, {"Ur": url, "Keywords": 0, "TrafficShare": 0.0}
+        )
+        agg["Keywords"] += 1
+        try:
+            agg["TrafficShare"] += float(r.get("Tr") or 0)
+        except ValueError:
+            pass
+
+    return sorted(by_url.values(), key=lambda x: x["TrafficShare"], reverse=True)[:limit]
