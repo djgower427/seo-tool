@@ -150,30 +150,39 @@ def render() -> None:
 
     domain = normalize_domain(domain_input)
 
-    try:
-        with st.spinner("Querying Semrush…"):
-            overview = _cached_overview(domain, database, api_key)
-            history = _cached_history(domain, database, api_key, int(history_months))
-            pages = _cached_top_pages(domain, database, api_key, int(page_limit))
-    except SemrushError as e:
-        st.error(f"Semrush API error: {e}")
-        return
-    except httpx.HTTPError as e:
-        st.error(f"Network error talking to Semrush: {e}")
-        return
+    def _safe_call(label: str, fn, *args):
+        try:
+            return fn(*args)
+        except SemrushError as e:
+            st.error(f"{label} — Semrush error: {e}")
+        except httpx.HTTPError as e:
+            st.error(f"{label} — network error: {e}")
+        return None
 
-    if not overview:
+    with st.spinner("Querying Semrush…"):
+        overview = _safe_call(
+            "Overview", _cached_overview, domain, database, api_key
+        )
+        history = _safe_call(
+            "History", _cached_history, domain, database, api_key, int(history_months)
+        )
+        pages = _safe_call(
+            "Top pages", _cached_top_pages, domain, database, api_key, int(page_limit)
+        )
+
+    if overview:
+        st.subheader(f"Overview — {domain} ({database})")
+        render_overview(overview)
+    elif overview is not None:  # call succeeded but returned no rows
         st.warning(f"Semrush has no data for `{domain}` in the `{database}` database.")
-        return
 
-    st.subheader(f"Overview — {domain} ({database})")
-    render_overview(overview)
+    if history is not None:
+        st.subheader("Traffic & keywords over time")
+        render_history(history)
 
-    st.subheader("Traffic & keywords over time")
-    render_history(history)
-
-    st.subheader(f"Top {len(pages)} pages by estimated organic traffic")
-    render_top_pages(pages)
+    if pages is not None:
+        st.subheader(f"Top {len(pages)} pages by estimated organic traffic")
+        render_top_pages(pages)
 
 
 render()

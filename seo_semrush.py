@@ -16,15 +16,23 @@ class SemrushError(Exception):
 
 
 def _request(params: dict[str, str]) -> list[dict[str, str]]:
-    """Call Semrush API and parse CSV into a list of dicts."""
+    """Call Semrush API and parse CSV into a list of dicts.
+
+    Semrush surfaces validation errors two different ways: as HTTP 4xx with a
+    plain-text body (e.g. bad column code), or as HTTP 200 with the body
+    starting with "ERROR ..." (e.g. domain not in database, out of credits).
+    We treat both as SemrushError so the UI gets the real message.
+    """
     r = httpx.get(SEMRUSH_BASE, params=params, timeout=30.0)
-    r.raise_for_status()
     text = r.text.strip()
+    report_type = params.get("type", "?")
+    if r.status_code >= 400:
+        body = text or r.reason_phrase
+        raise SemrushError(f"[{report_type}] HTTP {r.status_code}: {body}")
+    if text.startswith("ERROR"):
+        raise SemrushError(f"[{report_type}] {text}")
     if not text:
         return []
-    # Semrush surfaces errors as plain text like "ERROR 50 :: NOTHING FOUND".
-    if text.startswith("ERROR"):
-        raise SemrushError(text)
     lines = text.splitlines()
     header = lines[0].split(";")
     return [dict(zip(header, line.split(";"))) for line in lines[1:]]
