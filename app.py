@@ -9,7 +9,6 @@ import html
 import os
 import re
 from datetime import datetime
-from io import BytesIO
 from urllib.parse import urlparse
 
 import httpx
@@ -17,7 +16,7 @@ import markdown as md
 import streamlit as st
 from anthropic import Anthropic
 from dotenv import load_dotenv
-from xhtml2pdf import pisa
+from fpdf import FPDF
 
 from seo_review import (
     MODEL,
@@ -131,8 +130,28 @@ def _safe_filename(final_url: str, timestamp: str) -> str:
     return f"seo-review-{safe_domain}-{safe_ts}.pdf"
 
 
+_LATIN1_REPLACEMENTS = {
+    "—": "--",   # em dash
+    "–": "-",    # en dash
+    "‘": "'",    # left single quote
+    "’": "'",    # right single quote
+    "“": '"',    # left double quote
+    "”": '"',    # right double quote
+    "…": "...",  # ellipsis
+    "•": "-",    # bullet
+    "→": "->",   # right arrow
+}
+
+
+def _sanitize_for_latin1(text: str) -> str:
+    """fpdf2's built-in Helvetica is latin-1; substitute common smart chars, drop the rest."""
+    for src, dst in _LATIN1_REPLACEMENTS.items():
+        text = text.replace(src, dst)
+    return text.encode("latin-1", errors="replace").decode("latin-1")
+
+
 def report_to_pdf_bytes(result: dict) -> bytes:
-    """Render a review result as a styled PDF and return the bytes."""
+    """Render a review result as a PDF and return the bytes."""
     page = result["page"]
     link_results = result["link_results"]
     broken = sum(
@@ -142,42 +161,29 @@ def report_to_pdf_bytes(result: dict) -> bytes:
     missing_alt = sum(1 for i in page["images"] if not i["alt"])
     report_html = md.markdown(result["report"], extensions=["extra", "sane_lists"])
 
-    doc = f"""<!doctype html>
-<html><head><meta charset="utf-8"><style>
-@page {{ size: letter; margin: 0.75in; }}
-body {{ font-family: Helvetica, Arial, sans-serif; font-size: 11pt; color: #222; line-height: 1.45; }}
-h1 {{ font-size: 20pt; margin: 0 0 4pt 0; }}
-h2 {{ font-size: 14pt; margin-top: 18pt; color: #1a4480; }}
-h3 {{ font-size: 12pt; margin-top: 12pt; }}
-.meta {{ color: #666; font-size: 9pt; margin-bottom: 14pt; }}
-.stats {{ width: 100%; border-collapse: collapse; margin-bottom: 18pt; }}
-.stats td {{ border: 1px solid #ddd; padding: 6pt 10pt; font-size: 10pt; }}
-.stats td.label {{ background: #f6f6f6; font-weight: bold; width: 35%; }}
-code {{ background: #f4f4f4; padding: 1pt 3pt; font-size: 9.5pt; }}
-pre {{ background: #f4f4f4; padding: 6pt; font-size: 9.5pt; }}
-ul, ol {{ margin: 4pt 0 8pt 0; padding-left: 20pt; }}
-li {{ margin: 2pt 0; }}
-hr {{ border: none; border-top: 1px solid #ddd; margin: 18pt 0; }}
-</style></head><body>
+    body_html = f"""
 <h1>SEO Review</h1>
-<div class="meta">
-  <strong>URL:</strong> {html.escape(result["final_url"])}<br>
-  <strong>Generated:</strong> {html.escape(result["timestamp"])}
-</div>
-<table class="stats">
-  <tr><td class="label">Word count</td><td>{page["word_count"]}</td></tr>
-  <tr><td class="label">Links</td><td>{len(link_results)} ({broken} broken)</td></tr>
-  <tr><td class="label">Images</td><td>{len(page["images"])} ({missing_alt} missing alt)</td></tr>
-  <tr><td class="label">Title</td><td>{html.escape(page["title"] or "(none)")}</td></tr>
-  <tr><td class="label">Meta description</td><td>{html.escape(page["meta_description"] or "(none)")}</td></tr>
+<p><b>URL:</b> {html.escape(result["final_url"])}<br>
+<b>Generated:</b> {html.escape(result["timestamp"])}</p>
+<table border="1" cellpadding="4" width="100%">
+  <tr><td width="35%"><b>Word count</b></td><td>{page["word_count"]}</td></tr>
+  <tr><td><b>Links</b></td><td>{len(link_results)} ({broken} broken)</td></tr>
+  <tr><td><b>Images</b></td><td>{len(page["images"])} ({missing_alt} missing alt)</td></tr>
+  <tr><td><b>Title</b></td><td>{html.escape(page["title"] or "(none)")}</td></tr>
+  <tr><td><b>Meta description</b></td><td>{html.escape(page["meta_description"] or "(none)")}</td></tr>
 </table>
 <hr>
 {report_html}
-</body></html>"""
+"""
 
-    buf = BytesIO()
-    pisa.CreatePDF(doc, dest=buf)
-    return buf.getvalue()
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Helvetica", size=11)
+    pdf.write_html(_sanitize_for_latin1(body_html))
+
+    out = pdf.output()  # fpdf2 returns bytearray
+    return bytes(out)
 
 
 def render_result(result: dict) -> None:
