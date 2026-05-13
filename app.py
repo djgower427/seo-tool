@@ -166,11 +166,11 @@ def report_to_pdf_bytes(result: dict) -> bytes:
 <p><b>URL:</b> {html.escape(result["final_url"])}<br>
 <b>Generated:</b> {html.escape(result["timestamp"])}</p>
 <table border="1" cellpadding="4" width="100%">
-  <tr><td width="35%"><b>Word count</b></td><td>{page["word_count"]}</td></tr>
-  <tr><td><b>Links</b></td><td>{len(link_results)} ({broken} broken)</td></tr>
-  <tr><td><b>Images</b></td><td>{len(page["images"])} ({missing_alt} missing alt)</td></tr>
-  <tr><td><b>Title</b></td><td>{html.escape(page["title"] or "(none)")}</td></tr>
-  <tr><td><b>Meta description</b></td><td>{html.escape(page["meta_description"] or "(none)")}</td></tr>
+  <tr><td width="35%"><b>Word count</b></td><td width="65%">{page["word_count"]}</td></tr>
+  <tr><td width="35%"><b>Links</b></td><td width="65%">{len(link_results)} ({broken} broken)</td></tr>
+  <tr><td width="35%"><b>Images</b></td><td width="65%">{len(page["images"])} ({missing_alt} missing alt)</td></tr>
+  <tr><td width="35%"><b>Title</b></td><td width="65%">{html.escape(page["title"] or "(none)")}</td></tr>
+  <tr><td width="35%"><b>Meta description</b></td><td width="65%">{html.escape(page["meta_description"] or "(none)")}</td></tr>
 </table>
 <hr>
 {report_html}
