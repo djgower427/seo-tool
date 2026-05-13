@@ -1,3 +1,7 @@
 [theme]
+base = "dark"
 # Primary accent: deep green that reads well on both light and dark themes.
 primaryColor = "#16a34a"
+backgroundColor = "#000000"
+secondaryBackgroundColor = "#1a1a1a"
+textColor = "#ffffff"
