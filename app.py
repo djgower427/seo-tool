@@ -175,7 +175,7 @@ def render_result(result: dict) -> None:
 
 
 def main() -> None:
-    st.title("🔎 SEO Review")
+    st.title("🔎 Dan's mid SEO app")
     st.caption("Enter a URL to get a full review: broken links, grammar, copywriting frameworks, and on-page SEO.")
 
     api_key = get_api_key()
