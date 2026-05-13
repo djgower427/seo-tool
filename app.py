@@ -15,6 +15,7 @@ import httpx
 import markdown as md
 import streamlit as st
 from anthropic import Anthropic
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from fpdf import FPDF
 
@@ -150,6 +151,16 @@ def _sanitize_for_latin1(text: str) -> str:
     return text.encode("latin-1", errors="replace").decode("latin-1")
 
 
+def _flatten_table_cells(html_str: str) -> str:
+    """fpdf2's write_html only accepts plain text inside <td>/<th>. Strip nested tags."""
+    soup = BeautifulSoup(html_str, "html.parser")
+    for cell in soup.find_all(["td", "th"]):
+        text = cell.get_text(" ", strip=True)
+        cell.clear()
+        cell.append(text)
+    return str(soup)
+
+
 def report_to_pdf_bytes(result: dict) -> bytes:
     """Render a review result as a PDF and return the bytes."""
     page = result["page"]
@@ -165,15 +176,13 @@ def report_to_pdf_bytes(result: dict) -> bytes:
 <h1>SEO Review</h1>
 <p><b>URL:</b> {html.escape(result["final_url"])}<br>
 <b>Generated:</b> {html.escape(result["timestamp"])}</p>
-<table border="1" cellpadding="4" width="100%">
-  <tr><td width="35%"><b>Word count</b></td><td width="65%">{page["word_count"]}</td></tr>
-  <tr><td width="35%"><b>Links</b></td><td width="65%">{len(link_results)} ({broken} broken)</td></tr>
-  <tr><td width="35%"><b>Images</b></td><td width="65%">{len(page["images"])} ({missing_alt} missing alt)</td></tr>
-  <tr><td width="35%"><b>Title</b></td><td width="65%">{html.escape(page["title"] or "(none)")}</td></tr>
-  <tr><td width="35%"><b>Meta description</b></td><td width="65%">{html.escape(page["meta_description"] or "(none)")}</td></tr>
-</table>
+<p><b>Word count:</b> {page["word_count"]}<br>
+<b>Links:</b> {len(link_results)} ({broken} broken)<br>
+<b>Images:</b> {len(page["images"])} ({missing_alt} missing alt)<br>
+<b>Title:</b> {html.escape(page["title"] or "(none)")}<br>
+<b>Meta description:</b> {html.escape(page["meta_description"] or "(none)")}</p>
 <hr>
-{report_html}
+{_flatten_table_cells(report_html)}
 """
 
     pdf = FPDF()
