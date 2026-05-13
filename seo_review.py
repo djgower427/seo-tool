@@ -86,10 +86,18 @@ def extract_page_data(final_url: str, html: str) -> dict:
     }
 
 
-def check_links(links: list[dict], base_url: str) -> list[dict]:
-    """HEAD-check each link; fall back to GET if HEAD isn't supported."""
+def check_links(
+    links: list[dict],
+    base_url: str,
+    on_progress=None,
+) -> list[dict]:
+    """HEAD-check each link; fall back to GET if HEAD isn't supported.
+
+    on_progress(i, total, href) is called before each request, when provided.
+    """
     results = []
     base_host = urlparse(base_url).netloc
+    total = len(links)
     with httpx.Client(
         follow_redirects=True,
         timeout=LINK_CHECK_TIMEOUT,
@@ -97,7 +105,8 @@ def check_links(links: list[dict], base_url: str) -> list[dict]:
     ) as client:
         for i, link in enumerate(links, 1):
             href = link["href"]
-            print(f"  [{i}/{len(links)}] {href}", file=sys.stderr)
+            if on_progress is not None:
+                on_progress(i, total, href)
             status: int | None = None
             error = ""
             try:
@@ -171,7 +180,12 @@ Using ONLY the data provided below (do not invent details about the page that ar
 1. **Summary** — 2-3 sentences on the page's overall health.
 2. **Broken Links** — list each broken/errored link with its status and a brief note. If none, say so.
 3. **Grammar & Spelling** — specific issues you spot in the body text, with the offending phrase quoted.
-4. **Copywriting Suggestions** — concrete improvements to clarity, tone, structure, CTAs.
+4. **Copywriting Suggestions** — evaluate the page against these established copywriting frameworks and give concrete improvements:
+   - **PAS (Problem–Agitate–Solution)**: Does the page name a problem the reader has, agitate the pain of it, and present the offering as the solution? Quote what's working and what's missing.
+   - **AIDA (Attention–Interest–Desire–Action)**: Does the headline/hero grab attention, the next section build interest, the body create desire, and a clear CTA drive action? Identify which stage is weakest.
+   - **BAB (Before–After–Bridge)**: Does the copy paint the reader's "before" state, the "after" state they want, and bridge with the offering? Suggest specific rewrites if absent.
+   - **StoryBrand (SB7)**: Does the page cast the reader as the hero with a clear problem, position the brand as the guide with a plan, call them to action, and contrast success vs. failure? Flag any of the 7 elements that are missing or muddled.
+   For each framework, give a 1-line verdict (e.g. "PAS: weak — problem is implied but never named") plus 1–2 concrete rewrites or additions. End the section with a short "Recommended primary framework" pick based on the page's intent and what's already on the page.
 5. **On-Page SEO** — title tag, meta description, headings hierarchy, image alt text, internal linking, content depth. Be specific and actionable.
 6. **Priority Fixes** — a numbered list of the top 3-5 things to address first.
 
@@ -208,7 +222,11 @@ def main() -> int:
           f"{page['word_count']} words", file=sys.stderr)
 
     print(f"Checking {len(page['links'])} links …", file=sys.stderr)
-    link_results = check_links(page["links"], final_url)
+
+    def _cli_progress(i: int, total: int, href: str) -> None:
+        print(f"  [{i}/{total}] {href}", file=sys.stderr)
+
+    link_results = check_links(page["links"], final_url, on_progress=_cli_progress)
 
     print("Calling Claude for the review …", file=sys.stderr)
     client = Anthropic(api_key=api_key)

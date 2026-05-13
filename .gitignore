@@ -2,6 +2,7 @@
 .env
 .env.local
 *.env.local
+.streamlit/secrets.toml
 
 # Python
 __pycache__/
@@ -25,3 +26,6 @@ htmlcov/
 # Tool output
 output/
 *.log
+
+# Claude Code local settings
+.claude/settings.local.json
