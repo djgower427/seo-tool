@@ -5,3 +5,10 @@ primaryColor = "#16a34a"
 backgroundColor = "#000000"
 secondaryBackgroundColor = "#1a1a1a"
 textColor = "#ffffff"
+
+[client]
+# Don't dump full tracebacks into the UI. Tracebacks from httpx calls can
+# contain the Semrush API key (it's in the request URL). Our API client
+# redacts errors before raising; this is belt-and-suspenders for anything
+# that slips past.
+showErrorDetails = false

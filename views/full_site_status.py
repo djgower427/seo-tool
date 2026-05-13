@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import datetime
 from urllib.parse import urlparse
 
-import httpx
 import pandas as pd
 import streamlit as st
 
@@ -154,9 +153,7 @@ def render() -> None:
         try:
             return fn(*args)
         except SemrushError as e:
-            st.error(f"{label} — Semrush error: {e}")
-        except httpx.HTTPError as e:
-            st.error(f"{label} — network error: {e}")
+            st.error(f"{label} — {e}")
         return None
 
     with st.spinner("Querying Semrush…"):

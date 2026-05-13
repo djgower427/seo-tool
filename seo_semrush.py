@@ -6,9 +6,18 @@ All endpoints return CSV (semicolon-delimited) with a header row.
 
 from __future__ import annotations
 
+import re
+
 import httpx
 
 SEMRUSH_BASE = "https://api.semrush.com/"
+
+_KEY_RE = re.compile(r"(key=)[^&\s]+", re.IGNORECASE)
+
+
+def _redact(text: str) -> str:
+    """Mask Semrush API keys in any string before it's surfaced to the UI."""
+    return _KEY_RE.sub(r"\1***", text)
 
 
 class SemrushError(Exception):
@@ -21,16 +30,24 @@ def _request(params: dict[str, str]) -> list[dict[str, str]]:
     Semrush surfaces validation errors two different ways: as HTTP 4xx with a
     plain-text body (e.g. bad column code), or as HTTP 200 with the body
     starting with "ERROR ..." (e.g. domain not in database, out of credits).
-    We treat both as SemrushError so the UI gets the real message.
+    We treat both as SemrushError so the UI gets the real message. All errors
+    pass through _redact() so the API key never reaches the UI even if httpx
+    includes the request URL in its exception message.
     """
-    r = httpx.get(SEMRUSH_BASE, params=params, timeout=30.0)
-    text = r.text.strip()
     report_type = params.get("type", "?")
+    try:
+        r = httpx.get(SEMRUSH_BASE, params=params, timeout=30.0)
+    except httpx.HTTPError as e:
+        # `from None` drops the chained traceback that would otherwise contain
+        # the un-redacted request URL.
+        raise SemrushError(f"[{report_type}] network error: {_redact(str(e))}") from None
+
+    text = r.text.strip()
     if r.status_code >= 400:
-        body = text or r.reason_phrase
+        body = _redact(text or r.reason_phrase)
         raise SemrushError(f"[{report_type}] HTTP {r.status_code}: {body}")
     if text.startswith("ERROR"):
-        raise SemrushError(f"[{report_type}] {text}")
+        raise SemrushError(f"[{report_type}] {_redact(text)}")
     if not text:
         return []
     lines = text.splitlines()
