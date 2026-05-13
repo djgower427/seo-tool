@@ -1,0 +1,3 @@
+[theme]
+# Primary accent: deep green that reads well on both light and dark themes.
+primaryColor = "#16a34a"

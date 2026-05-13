@@ -131,6 +131,8 @@ def _safe_filename(final_url: str, timestamp: str) -> str:
     return f"seo-review-{safe_domain}-{safe_ts}.pdf"
 
 
+HEADING_COLOR = "#16a34a"
+
 _LATIN1_REPLACEMENTS = {
     "—": "--",   # em dash
     "–": "-",    # en dash
@@ -151,13 +153,15 @@ def _sanitize_for_latin1(text: str) -> str:
     return text.encode("latin-1", errors="replace").decode("latin-1")
 
 
-def _flatten_table_cells(html_str: str) -> str:
-    """fpdf2's write_html only accepts plain text inside <td>/<th>. Strip nested tags."""
+def _prepare_report_html(html_str: str) -> str:
+    """Flatten table cells (fpdf2 limitation) and tint headings green."""
     soup = BeautifulSoup(html_str, "html.parser")
     for cell in soup.find_all(["td", "th"]):
         text = cell.get_text(" ", strip=True)
         cell.clear()
         cell.append(text)
+    for heading in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
+        heading["color"] = HEADING_COLOR
     return str(soup)
 
 
@@ -173,7 +177,7 @@ def report_to_pdf_bytes(result: dict) -> bytes:
     report_html = md.markdown(result["report"], extensions=["extra", "sane_lists"])
 
     body_html = f"""
-<h1>SEO Review</h1>
+<h1 color="{HEADING_COLOR}">SEO Review</h1>
 <p><b>URL:</b> {html.escape(result["final_url"])}<br>
 <b>Generated:</b> {html.escape(result["timestamp"])}</p>
 <p><b>Word count:</b> {page["word_count"]}<br>
@@ -182,7 +186,7 @@ def report_to_pdf_bytes(result: dict) -> bytes:
 <b>Title:</b> {html.escape(page["title"] or "(none)")}<br>
 <b>Meta description:</b> {html.escape(page["meta_description"] or "(none)")}</p>
 <hr>
-{_flatten_table_cells(report_html)}
+{_prepare_report_html(report_html)}
 """
 
     pdf = FPDF()
