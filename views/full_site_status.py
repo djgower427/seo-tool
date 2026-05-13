@@ -47,22 +47,33 @@ def _to_float(value: str | None) -> float:
         return 0.0
 
 
+# Bump when seo_semrush.py's parser/columns change in a way that affects
+# the shape of cached return values. The version flows into the cache key,
+# so older cached entries become unreachable on the next deploy.
+_API_CACHE_VERSION = 2
+
+
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
-def _cached_overview(domain: str, database: str, api_key: str) -> dict[str, str] | None:
+def _cached_overview(
+    domain: str, database: str, api_key: str, version: int
+) -> dict[str, str] | None:
+    del version  # only here to participate in the cache key
     return domain_overview(domain, database, api_key)
 
 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
 def _cached_history(
-    domain: str, database: str, api_key: str, limit: int
+    domain: str, database: str, api_key: str, limit: int, version: int
 ) -> list[dict[str, str]]:
+    del version
     return domain_rank_history(domain, database, api_key, limit=limit)
 
 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
 def _cached_top_pages(
-    domain: str, database: str, api_key: str, limit: int
+    domain: str, database: str, api_key: str, limit: int, version: int
 ) -> list[dict[str, str]]:
+    del version
     return top_pages(domain, database, api_key, limit=limit)
 
 
@@ -165,10 +176,16 @@ def render() -> None:
         database = c2.selectbox("Database", DATABASES, index=DATABASES.index("us"))
         history_months = c3.number_input("History (months)", 3, 60, 24)
         page_limit = c4.number_input("Top pages", 5, 100, 25)
+        force_refresh = st.checkbox(
+            "Force refresh (bypass 6-hour cache; costs Semrush credits)"
+        )
         submitted = st.form_submit_button("Run check", type="primary")
 
     if not submitted or not domain_input.strip():
         return
+
+    if force_refresh:
+        st.cache_data.clear()
 
     domain = normalize_domain(domain_input)
 
@@ -181,13 +198,15 @@ def render() -> None:
 
     with st.spinner("Querying Semrush…"):
         overview = _safe_call(
-            "Overview", _cached_overview, domain, database, api_key
+            "Overview", _cached_overview, domain, database, api_key, _API_CACHE_VERSION
         )
         history = _safe_call(
-            "History", _cached_history, domain, database, api_key, int(history_months)
+            "History", _cached_history, domain, database, api_key,
+            int(history_months), _API_CACHE_VERSION,
         )
         pages = _safe_call(
-            "Top pages", _cached_top_pages, domain, database, api_key, int(page_limit)
+            "Top pages", _cached_top_pages, domain, database, api_key,
+            int(page_limit), _API_CACHE_VERSION,
         )
 
     if overview:
