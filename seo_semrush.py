@@ -126,7 +126,7 @@ def domain_rank_history(
 
 def top_pages(
     domain: str, database: str, api_key: str, limit: int = 25, keyword_pool: int = 500
-) -> list[dict[str, str]]:
+) -> list[dict]:
     """Top pages by estimated organic traffic share.
 
     Semrush's standard Domain Analytics API has no direct "top pages" endpoint
@@ -134,6 +134,10 @@ def top_pages(
     top `keyword_pool` organic keywords for the domain and aggregating by URL:
     each page's score is the sum of `Tr` (traffic share %) across its ranking
     keywords. Returns the top `limit` URLs sorted by traffic share.
+
+    If Semrush returns keyword rows but none expose a URL column, raises
+    SemrushError with the column names it did return so the alias map can be
+    extended.
     """
     rows = _request(
         {
@@ -147,9 +151,12 @@ def top_pages(
         }
     )
 
+    if not rows:
+        return []
+
     by_url: dict[str, dict] = {}
     for r in rows:
-        url = r.get("Ur", "").strip()
+        url = (r.get("Ur") or "").strip()
         if not url:
             continue
         agg = by_url.setdefault(
@@ -160,5 +167,12 @@ def top_pages(
             agg["TrafficShare"] += float(r.get("Tr") or 0)
         except ValueError:
             pass
+
+    if not by_url:
+        sample_cols = list(rows[0].keys())
+        raise SemrushError(
+            f"got {len(rows)} keyword rows from domain_organic but none had a "
+            f"non-empty URL (Ur) column. Columns returned: {sample_cols}"
+        )
 
     return sorted(by_url.values(), key=lambda x: x["TrafficShare"], reverse=True)[:limit]
