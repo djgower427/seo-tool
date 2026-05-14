@@ -12,6 +12,7 @@ from seo_semrush import (
     SemrushError,
     domain_overview,
     domain_rank_history,
+    raw_request,
     top_pages,
 )
 
@@ -50,7 +51,7 @@ def _to_float(value: str | None) -> float:
 # Bump when seo_semrush.py's parser/columns change in a way that affects
 # the shape of cached return values. The version flows into the cache key,
 # so older cached entries become unreachable on the next deploy.
-_API_CACHE_VERSION = 3
+_API_CACHE_VERSION = 4
 
 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
@@ -179,6 +180,9 @@ def render() -> None:
         force_refresh = st.checkbox(
             "Force refresh (bypass 6-hour cache; costs Semrush credits)"
         )
+        debug_mode = st.checkbox(
+            "Debug: also show raw Semrush responses (uncached; extra credits)"
+        )
         submitted = st.form_submit_button("Run check", type="primary")
 
     if not submitted or not domain_input.strip():
@@ -222,6 +226,55 @@ def render() -> None:
     if pages is not None:
         st.subheader(f"Top {len(pages)} pages by organic traffic share")
         render_top_pages(pages)
+
+    if debug_mode:
+        st.divider()
+        st.subheader("Debug: raw Semrush responses")
+        for label, params in [
+            (
+                "domain_ranks",
+                {
+                    "type": "domain_ranks",
+                    "key": api_key,
+                    "domain": domain,
+                    "database": database,
+                    "export_columns": "Dn,Rk,Or,Ot,Oc,Ad,At,Ac",
+                },
+            ),
+            (
+                "domain_rank_history",
+                {
+                    "type": "domain_rank_history",
+                    "key": api_key,
+                    "domain": domain,
+                    "database": database,
+                    "export_columns": "Rk,Or,Ot,Oc,Dt",
+                    "display_limit": str(int(history_months)),
+                },
+            ),
+            (
+                "domain_organic (first 10)",
+                {
+                    "type": "domain_organic",
+                    "key": api_key,
+                    "domain": domain,
+                    "database": database,
+                    "export_columns": "Ph,Po,Nq,Ur,Tr",
+                    "display_limit": "10",
+                    "display_sort": "tr_desc",
+                },
+            ),
+        ]:
+            with st.expander(label):
+                try:
+                    body = raw_request(params)
+                except SemrushError as e:
+                    st.error(str(e))
+                    continue
+                if not body.strip():
+                    st.info("(empty response body)")
+                else:
+                    st.code(body, language="text")
 
 
 render()

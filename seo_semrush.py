@@ -58,6 +58,22 @@ class SemrushError(Exception):
     """Raised when Semrush returns an ERROR response or empty data."""
 
 
+def raw_request(params: dict[str, str]) -> str:
+    """Same wire call as _request but returns the raw response text (redacted on error).
+
+    Useful for a debug view of exactly what Semrush sent back.
+    """
+    report_type = params.get("type", "?")
+    try:
+        r = httpx.get(SEMRUSH_BASE, params=params, timeout=30.0)
+    except httpx.HTTPError as e:
+        raise SemrushError(f"[{report_type}] network error: {_redact(str(e))}") from None
+    if r.status_code >= 400:
+        body = _redact(r.text.strip() or r.reason_phrase)
+        raise SemrushError(f"[{report_type}] HTTP {r.status_code}: {body}")
+    return r.text
+
+
 def _request(params: dict[str, str]) -> list[dict[str, str]]:
     """Call Semrush API and parse CSV into a list of dicts.
 
@@ -152,7 +168,12 @@ def top_pages(
     )
 
     if not rows:
-        return []
+        raise SemrushError(
+            "domain_organic returned 0 rows. This is expected for domains with "
+            "no organic keywords in this database, but if the overview shows "
+            "organic traffic > 0 then your API plan may not include the "
+            "domain_organic endpoint."
+        )
 
     by_url: dict[str, dict] = {}
     for r in rows:
