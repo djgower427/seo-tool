@@ -51,7 +51,7 @@ def _to_float(value: str | None) -> float:
 # Bump when seo_semrush.py's parser/columns change in a way that affects
 # the shape of cached return values. The version flows into the cache key,
 # so older cached entries become unreachable on the next deploy.
-_API_CACHE_VERSION = 4
+_API_CACHE_VERSION = 5
 
 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)

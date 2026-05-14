@@ -41,6 +41,7 @@ _HEADER_ALIASES = {
     "Search Volume": "Nq",
     "CPC": "Cp",
     "URL": "Ur",
+    "Url": "Ur",
     "Traffic (%)": "Tr",
     "Traffic Cost (%)": "Tc",
     "Competition": "Co",
