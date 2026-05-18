@@ -114,19 +114,23 @@ def render_history(rows: list[dict[str, str]]) -> None:
         return
 
     df = pd.DataFrame(rows)
-    if _missing_cols_warning(df, ["Dt", "Ot", "Or"], "Traffic history"):
+    if _missing_cols_warning(df, ["Dt", "Ot", "Or", "Oc"], "Traffic history"):
         return
 
     df["Date"] = pd.to_datetime(df["Dt"], format="%Y%m%d", errors="coerce")
     df["Organic traffic"] = df["Ot"].apply(_to_int)
     df["Organic keywords"] = df["Or"].apply(_to_int)
+    df["Traffic value"] = df["Oc"].apply(_to_float)
     df = df.dropna(subset=["Date"]).sort_values("Date")
 
-    tabs = st.tabs(["Traffic", "Keywords"])
+    tabs = st.tabs(["Traffic", "Keywords", "Traffic value"])
     with tabs[0]:
         st.line_chart(df.set_index("Date")["Organic traffic"], height=320)
     with tabs[1]:
         st.line_chart(df.set_index("Date")["Organic keywords"], height=320)
+    with tabs[2]:
+        st.caption("Estimated monthly value of this organic traffic, in USD.")
+        st.line_chart(df.set_index("Date")["Traffic value"], height=320)
 
 
 def render_top_pages(rows: list[dict]) -> None:
