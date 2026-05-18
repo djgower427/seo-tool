@@ -142,7 +142,7 @@ def domain_rank_history(
 
 
 def top_pages(
-    domain: str, database: str, api_key: str, limit: int = 25, keyword_pool: int = 500
+    domain: str, database: str, api_key: str, limit: int = 25, keyword_pool: int = 100
 ) -> list[dict]:
     """Top pages by estimated organic traffic share.
 

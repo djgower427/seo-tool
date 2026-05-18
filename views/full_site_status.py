@@ -72,10 +72,15 @@ def _cached_history(
 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
 def _cached_top_pages(
-    domain: str, database: str, api_key: str, limit: int, version: int
+    domain: str,
+    database: str,
+    api_key: str,
+    limit: int,
+    keyword_pool: int,
+    version: int,
 ) -> list[dict[str, str]]:
     del version
-    return top_pages(domain, database, api_key, limit=limit)
+    return top_pages(domain, database, api_key, limit=limit, keyword_pool=keyword_pool)
 
 
 def render_overview(overview: dict[str, str]) -> None:
@@ -172,11 +177,24 @@ def render() -> None:
         st.stop()
 
     with st.form("site-status-form"):
-        c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
+        c1, c2, c3, c4, c5 = st.columns([3, 1, 1, 1, 1])
         domain_input = c1.text_input("Domain", placeholder="example.com")
         database = c2.selectbox("Database", DATABASES, index=DATABASES.index("us"))
         history_months = c3.number_input("History (months)", 3, 60, 24)
         page_limit = c4.number_input("Top pages", 5, 100, 25)
+        keyword_pool = c5.number_input(
+            "Keyword pool",
+            min_value=25,
+            max_value=500,
+            value=100,
+            step=25,
+            help=(
+                "Keywords pulled from Semrush and aggregated by URL to compute "
+                "top pages. Each row costs 10 Semrush credits (100 = 1,000 credits). "
+                "Sorted by traffic share, so the top ~25 pages are usually captured "
+                "in the first 100–150 keywords."
+            ),
+        )
         force_refresh = st.checkbox(
             "Force refresh (bypass 6-hour cache; costs Semrush credits)"
         )
@@ -210,7 +228,7 @@ def render() -> None:
         )
         pages = _safe_call(
             "Top pages", _cached_top_pages, domain, database, api_key,
-            int(page_limit), _API_CACHE_VERSION,
+            int(page_limit), int(keyword_pool), _API_CACHE_VERSION,
         )
 
     if overview:
