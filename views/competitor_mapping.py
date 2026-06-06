@@ -88,7 +88,7 @@ def _cached_recommendation(
     ours: str,
     api_key: str,
     version: int,
-) -> str:
+) -> dict[str, str]:
     """candidates_json is a JSON string so the cache key stays hashable."""
     del version
     return recommend_keyword_to_steal(
@@ -178,6 +178,46 @@ def _render_steal_table(rows: list[dict[str, Any]]) -> None:
         file_name=f"steal-able-keywords-{datetime.now():%Y%m%d}.csv",
         mime="text/csv",
     )
+
+
+def _render_recommendation(
+    rec: dict[str, str], candidates: list[dict[str, Any]]
+) -> None:
+    """Render the structured recommendation as a scannable block: target chip,
+    a metrics row pulled from the matching candidate, then short sections."""
+    kw = rec.get("keyword", "").strip()
+    if not kw:
+        st.info(
+            rec.get("no_fit_reason")
+            or "None of the steal-able keywords closely match our core offerings."
+        )
+        return
+
+    st.markdown(f"#### 🎯 Target keyword: “{kw}”")
+
+    match = next(
+        (c for c in candidates if c["Keyword"].strip().lower() == kw.lower()), None
+    )
+    if match:
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Volume", f"{match['Volume']:,}")
+        m2.metric("Difficulty", f"{match['Difficulty']:.0f}")
+        m3.metric("Competitor", f"#{match['Competitor position']}")
+        our_pos = match.get("Our position")
+        m4.metric("Us", f"#{our_pos}" if our_pos else "—")
+
+    if rec.get("why"):
+        st.markdown(f"**Why this keyword**  \n{rec['why']}")
+
+    blog_title = rec.get("blog_title", "").strip()
+    blog_angle = rec.get("blog_angle", "").strip()
+    if blog_title or blog_angle:
+        body = "**Blog to write**"
+        if blog_title:
+            body += f"  \n📝 *{blog_title}*"
+        if blog_angle:
+            body += f"  \n{blog_angle}"
+        st.markdown(body)
 
 
 def _offerings_field(domain: str, anthropic_key: str) -> str:
@@ -385,7 +425,7 @@ def render() -> None:
                     st.error(f"Claude — {e}")
                     rec = None
             if rec:
-                st.markdown(rec)
+                _render_recommendation(rec, candidates)
 
     st.subheader("Steal-able keywords")
     _render_steal_table(candidates)

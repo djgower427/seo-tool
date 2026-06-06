@@ -255,8 +255,53 @@ def build_similar_company_query(
 
 # The recommendation is a short, judgment-heavy writeup (relevance filtering +
 # prose), so it's worth the strongest model — the call is infrequent and the
-# output is one paragraph, so cost stays trivial.
+# output is tiny, so cost stays trivial.
 _RECOMMEND_MODEL = "claude-opus-4-8"
+
+_RECOMMEND_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "keyword": {
+            "type": "string",
+            "description": (
+                "The single recommended keyword to target, copied EXACTLY from "
+                "the candidate list. Empty string if none of the candidates "
+                "relate to our offerings."
+            ),
+        },
+        "why": {
+            "type": "string",
+            "description": (
+                "1-2 sentences on why this keyword is a good target — tie its "
+                "relevance to our offerings together with its volume/difficulty. "
+                "Empty when no keyword is recommended."
+            ),
+        },
+        "blog_title": {
+            "type": "string",
+            "description": (
+                "A concrete, compelling blog-post title we could publish to rank "
+                "for the keyword. Empty when no keyword is recommended."
+            ),
+        },
+        "blog_angle": {
+            "type": "string",
+            "description": (
+                "1-2 sentences on the angle/content of that blog post and why it "
+                "would capture the traffic. Empty when no keyword is recommended."
+            ),
+        },
+        "no_fit_reason": {
+            "type": "string",
+            "description": (
+                "When keyword is empty: one sentence on why none of the "
+                "candidates relate to our offerings. Empty otherwise."
+            ),
+        },
+    },
+    "required": ["keyword", "why", "blog_title", "blog_angle", "no_fit_reason"],
+    "additionalProperties": False,
+}
 
 
 def recommend_keyword_to_steal(
@@ -266,18 +311,17 @@ def recommend_keyword_to_steal(
     competitor_domain: str,
     our_domain: str,
     api_key: str,
-) -> str:
-    """One-paragraph recommendation of which keyword to target and how.
+) -> dict[str, str]:
+    """Recommend which keyword to target and how, as structured fields.
 
     `candidates` are steal-able keyword rows (competitor ranks, we don't or rank
     worse), each with Keyword / Volume / Difficulty / Competitor position / Our
-    position. `offerings` describes Sketch's core products/services — the model
-    is told to recommend ONLY keywords that clearly relate to them, and to say
-    so plainly if none do.
+    position. `offerings` describes our core products/services — the model is
+    told to recommend ONLY a keyword that clearly relates to them, and to leave
+    `keyword` empty (with a `no_fit_reason`) if none do.
 
-    Returns a single markdown paragraph naming the keyword, why it's worth
-    pursuing, and what kind of blog post would help capture the traffic. Raises
-    ClaudeError on API errors or an empty response.
+    Returns a dict with keys: keyword, why, blog_title, blog_angle,
+    no_fit_reason. Raises ClaudeError on API errors or a malformed response.
     """
     client = anthropic.Anthropic(api_key=api_key)
 
@@ -293,23 +337,20 @@ def recommend_keyword_to_steal(
     candidate_block = "\n".join(lines) if lines else "(none)"
 
     prompt = (
-        "You advise Sketch (sketchdev.io) on SEO. Below are keywords the "
-        f"competitor {competitor_domain} ranks for that {our_domain} (Sketch) "
-        "does not rank for, or ranks worse for — i.e. keywords Sketch could try "
-        "to steal organic traffic for.\n\n"
-        f"Sketch's core offerings:\n{offerings.strip()}\n\n"
+        f"You advise {our_domain} on SEO. Below are keywords the competitor "
+        f"{competitor_domain} ranks for that {our_domain} does not rank for, or "
+        "ranks worse for — i.e. keywords we could try to steal organic traffic "
+        "for.\n\n"
+        f"Our core offerings:\n{offerings.strip()}\n\n"
         f"Candidate keywords (easiest first):\n{candidate_block}\n\n"
-        "Recommend which ONE keyword (occasionally two if they're closely "
-        "related) Sketch should target. Strict rule: only recommend a keyword "
-        "that clearly relates to Sketch's core offerings above — ignore keywords "
-        "about unrelated topics, the competitor's own brand, or products Sketch "
-        "doesn't sell, no matter how easy they look. If none of the candidates "
-        "genuinely relate to Sketch's offerings, say so plainly in one sentence "
-        "and recommend nothing.\n\n"
-        "Write a single concise paragraph (no headings, no bullet lists) that "
-        "names the keyword, explains why it's a good target (tie its volume and "
-        "difficulty to the relevance to Sketch's offerings), and describes the "
-        "kind of blog post Sketch should write to capture the traffic."
+        "Recommend the ONE keyword we should target. Strict rule: only "
+        "recommend a keyword that clearly relates to our core offerings above — "
+        "ignore keywords about unrelated topics, the competitor's own brand, or "
+        "products we don't sell, no matter how easy they look. If none of the "
+        "candidates genuinely relate to our offerings, leave the keyword empty "
+        "and explain why in no_fit_reason.\n\n"
+        "Keep every field tight and concrete — these render as short labeled "
+        "sections, not a paragraph."
     )
 
     try:
@@ -317,6 +358,9 @@ def recommend_keyword_to_steal(
             model=_RECOMMEND_MODEL,
             max_tokens=700,
             messages=[{"role": "user", "content": prompt}],
+            output_config={
+                "format": {"type": "json_schema", "schema": _RECOMMEND_SCHEMA}
+            },
         )
     except anthropic.AuthenticationError:
         raise ClaudeError(
@@ -329,10 +373,19 @@ def recommend_keyword_to_steal(
     except anthropic.APIError as e:
         raise ClaudeError(f"Anthropic API error: {e}") from None
 
-    text = "".join(b.text for b in response.content if b.type == "text").strip()
-    if not text:
-        raise ClaudeError("Claude returned an empty recommendation")
-    return text
+    try:
+        text = next(b.text for b in response.content if b.type == "text")
+        data = json.loads(text)
+    except (StopIteration, json.JSONDecodeError, AttributeError) as e:
+        raise ClaudeError(f"could not parse Claude response: {e}") from None
+
+    return {
+        "keyword": (data.get("keyword") or "").strip(),
+        "why": (data.get("why") or "").strip(),
+        "blog_title": (data.get("blog_title") or "").strip(),
+        "blog_angle": (data.get("blog_angle") or "").strip(),
+        "no_fit_reason": (data.get("no_fit_reason") or "").strip(),
+    }
 
 
 # Homepages are long; cap what we send to keep the summary call cheap.
