@@ -150,53 +150,37 @@ def _fmt_money(v: Any) -> str:
 
 
 def render_apollo(org: dict) -> None:
-    """Render the four enrichment sections (size/industry, funding, tech, social).
-
-    Field names follow Apollo's documented response shape. Anything missing
-    renders as '—' — Apollo's coverage varies a lot by company size and region.
+    """Render Apollo enrichment as a flat key/value table, plus a compact links
+    row and a tech-stack pill list. Anything missing shows as '—' — Apollo's
+    coverage varies a lot by company size and region.
     """
-    # Company & size
-    st.markdown("**Company**")
-    cols = st.columns(4)
-    cols[0].metric("Employees", _fmt_int(org.get("estimated_num_employees")))
-    cols[1].metric("Industry", (org.get("industry") or "—").title() if org.get("industry") else "—")
-    location_parts = [
-        org.get("city"),
-        org.get("state"),
-        org.get("country"),
-    ]
+    location_parts = [org.get("city"), org.get("state"), org.get("country")]
     location = ", ".join(p for p in location_parts if p) or "—"
-    cols[2].metric("HQ", location)
     revenue = org.get("annual_revenue_printed") or _fmt_money(org.get("annual_revenue"))
-    cols[3].metric("Est. revenue", revenue)
-
-    # Funding
-    st.markdown("**Funding**")
-    cols = st.columns(3)
     total_raised = org.get("total_funding_printed") or _fmt_money(org.get("total_funding"))
-    cols[0].metric("Total raised", total_raised)
-    cols[1].metric("Latest stage", org.get("latest_funding_stage") or "—")
-    cols[2].metric("Latest round", org.get("latest_funding_round_date") or "—")
+    industry = (org.get("industry") or "").title() or "—"
+    phone_obj = org.get("primary_phone")
+    phone = (
+        phone_obj.get("number") if isinstance(phone_obj, dict) else org.get("phone")
+    ) or "—"
 
-    # Tech stack
-    st.markdown("**Tech stack**")
-    techs = org.get("technology_names") or org.get("current_technologies") or []
-    # current_technologies is a list of dicts {name, category, uid}; normalize.
-    tech_names = []
-    for t in techs:
-        if isinstance(t, str):
-            tech_names.append(t)
-        elif isinstance(t, dict) and t.get("name"):
-            tech_names.append(t["name"])
-    if tech_names:
-        st.caption(f"{len(tech_names)} technologies detected by Apollo")
-        # Render as a wrap-friendly pill list.
-        st.markdown(" ".join(f"`{name}`" for name in tech_names))
-    else:
-        st.caption("No tech stack data returned for this company.")
+    rows = [
+        ("Employees", _fmt_int(org.get("estimated_num_employees"))),
+        ("Industry", industry),
+        ("HQ", location),
+        ("Est. revenue", revenue),
+        ("Total raised", total_raised),
+        ("Latest funding stage", org.get("latest_funding_stage") or "—"),
+        ("Latest round date", org.get("latest_funding_round_date") or "—"),
+        ("Phone", phone),
+    ]
+    st.dataframe(
+        pd.DataFrame(rows, columns=["Field", "Value"]),
+        use_container_width=True,
+        hide_index=True,
+    )
 
-    # Social & contact
-    st.markdown("**Links & contact**")
+    # Compact links row (clickable markdown, only rendered URLs that exist).
     links = []
     for label, key in [
         ("Website", "website_url"),
@@ -207,10 +191,20 @@ def render_apollo(org: dict) -> None:
         url = org.get(key)
         if url:
             links.append(f"[{label}]({url})")
-    phone = (org.get("primary_phone") or {}).get("number") if isinstance(org.get("primary_phone"), dict) else org.get("phone")
-    if phone:
-        links.append(f"☎ {phone}")
-    st.markdown(" · ".join(links) if links else "—")
+    if links:
+        st.markdown("**Links** · " + " · ".join(links))
+
+    # Tech stack — wrap-friendly pill list, only if Apollo returned any.
+    techs = org.get("technology_names") or org.get("current_technologies") or []
+    tech_names = []
+    for t in techs:
+        if isinstance(t, str):
+            tech_names.append(t)
+        elif isinstance(t, dict) and t.get("name"):
+            tech_names.append(t["name"])
+    if tech_names:
+        st.markdown(f"**Tech stack** — {len(tech_names)} technologies detected")
+        st.markdown(" ".join(f"`{name}`" for name in tech_names))
 
 
 def render_top_pages(rows: list[dict]) -> None:
