@@ -100,7 +100,6 @@ SENIORITIES = [
     "intern",
 ]
 
-
 def people_search(
     domain: str,
     api_key: str,
@@ -116,8 +115,9 @@ def people_search(
     list) and `pagination` (total counts, page info). Emails are NOT returned
     by this endpoint; each person record has an `id` to use with person_reveal().
 
-    Apollo accepts up to 1,000 domains per call but we expose one — most
-    "find contacts at this company" workflows are single-domain.
+    `titles` is passed to Apollo's person_titles[] filter, which does fuzzy
+    server-side matching — pass several variants of a role (e.g. "VP Marketing"
+    AND "Vice President of Marketing") for broader recall.
     """
     body: dict[str, Any] = {
         "q_organization_domains_list": [domain],

@@ -26,6 +26,10 @@ def get_apollo_key() -> str | None:
     return _secret("APOLLO_API_KEY")
 
 
+def get_anthropic_key() -> str | None:
+    return _secret("ANTHROPIC_API_KEY")
+
+
 def normalize_domain(raw: str) -> str:
     """Accept either a bare domain or a URL; return the bare host."""
     raw = raw.strip().lower()

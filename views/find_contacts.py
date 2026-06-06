@@ -19,10 +19,11 @@ from seo_apollo import (
     people_search,
     person_reveal,
 )
-from seo_keys import get_apollo_key, normalize_domain
+from seo_claude import ClaudeError, expand_job_function
+from seo_keys import get_anthropic_key, get_apollo_key, normalize_domain
 
-# Bump if the cached search return shape changes.
-_SEARCH_CACHE_VERSION = 1
+# Bump if the cached query / search return shape changes.
+_SEARCH_CACHE_VERSION = 3
 
 # Keys into st.session_state
 _REVEAL_CACHE_KEY = "_apollo_revealed_people"  # dict[person_id, dict]
@@ -59,10 +60,20 @@ def _cached_people_search(
     )
 
 
-def _parse_titles_input(raw: str) -> list[str]:
-    """Comma- or newline-separated titles, stripped of whitespace and blanks."""
-    parts = [p.strip() for p in raw.replace("\n", ",").split(",")]
-    return [p for p in parts if p]
+# Title lists for a given function don't change day-to-day; cache for a week
+# to avoid re-calling Claude on the same input.
+@st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=False)
+def _cached_expand_function(
+    function: str,
+    seniorities_key: tuple[str, ...],
+    api_key: str,
+    version: int,
+) -> tuple[str, ...]:
+    del version
+    titles = expand_job_function(
+        function, api_key, seniorities=list(seniorities_key) or None
+    )
+    return tuple(titles)
 
 
 def _person_row(p: dict[str, Any], revealed: dict[str, dict]) -> dict[str, Any]:
@@ -155,32 +166,61 @@ def render() -> None:
         st.stop()
 
     with st.form("find-contacts-form"):
-        c1, c2 = st.columns([2, 1])
-        domain_input = c1.text_input(
+        domain_input = st.text_input(
             "Company domain", placeholder="stripe.com",
             help="One domain at a time. Apollo finds people whose current employer matches.",
         )
-        seniorities = c2.multiselect(
+        function_input = st.text_input(
+            "Job function",
+            placeholder="e.g. marketing leadership, demand generation, head of growth",
+            help=(
+                "Plain-language description of the role. Claude expands this "
+                "into ~6–20 concrete job titles before searching Apollo. "
+                "Leave empty to search every contact at the domain."
+            ),
+        )
+        seniorities = st.multiselect(
             "Seniority",
             options=SENIORITIES,
             default=[],
             help="Apollo's defined seniority buckets. Leave empty for all.",
         )
-        titles_raw = st.text_input(
-            "Job titles (comma-separated)",
-            placeholder="head of marketing, vp of growth, cmo",
-            help="Apollo does fuzzy matching, so close variants are fine.",
-        )
-        c3, c4 = st.columns(2)
-        per_page = c3.number_input("Results per page", 10, 100, 25, step=5)
-        page = c4.number_input("Page", 1, 500, 1)
+        c1, c2 = st.columns(2)
+        per_page = c1.number_input("Results per page", 10, 100, 25, step=5)
+        page = c2.number_input("Page", 1, 500, 1)
         submitted = st.form_submit_button("Search (free)", type="primary")
 
-    # Persist last search params so the page survives reruns after reveals.
+    # On submit: expand the function to titles via Claude (if non-empty),
+    # then persist params so the page survives reruns after reveals.
     if submitted and domain_input.strip():
+        function = function_input.strip()
+        titles: list[str] = []
+        if function:
+            anthropic_key = get_anthropic_key()
+            if not anthropic_key:
+                st.error(
+                    "`ANTHROPIC_API_KEY` is not set. Add it to Streamlit Cloud "
+                    "Secrets, or leave Job function empty to skip title expansion."
+                )
+                return
+            with st.spinner(f"Asking Claude for titles related to “{function}”…"):
+                try:
+                    titles = list(
+                        _cached_expand_function(
+                            function,
+                            tuple(seniorities),
+                            anthropic_key,
+                            _SEARCH_CACHE_VERSION,
+                        )
+                    )
+                except ClaudeError as e:
+                    st.error(f"Claude — {e}")
+                    return
+
         st.session_state["_find_contacts_query"] = {
             "domain": normalize_domain(domain_input),
-            "titles": _parse_titles_input(titles_raw),
+            "function": function,
+            "titles": titles,
             "seniorities": seniorities,
             "page": int(page),
             "per_page": int(per_page),
@@ -204,6 +244,16 @@ def render() -> None:
         except ApolloError as e:
             st.error(f"Apollo — {e}")
             return
+
+    # Surface the Claude-generated titles so the user can see what was actually
+    # searched and tune their input.
+    if query.get("function") and query.get("titles"):
+        label = (
+            f"Searched {len(query['titles'])} title variants of "
+            f"“{query['function']}” (click to expand)"
+        )
+        with st.expander(label):
+            st.markdown(" · ".join(f"`{t}`" for t in query["titles"]))
 
     people = result.get("people") or []
     pagination = result.get("pagination") or {}
