@@ -126,6 +126,34 @@ def _render_company_summary(company: dict[str, Any]) -> None:
         st.json(company)
 
 
+def _dedupe_by_domain(
+    companies: list[dict[str, Any]],
+    already_seen: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Apollo can return multiple records per company (e.g. three CRM rows
+    that all point to the same Apollo organization). Collapse by
+    primary_domain — keep the first record, drop the rest. `already_seen`
+    threads accumulated domains across multiple arrays so a domain that
+    appears in `accounts` is hidden from `organizations`.
+
+    Returns (deduped_list, removed_count).
+    """
+    seen = set(already_seen or ())
+    out: list[dict[str, Any]] = []
+    removed = 0
+    for c in companies:
+        domain = (c.get("primary_domain") or c.get("domain") or "").strip().lower()
+        if not domain:
+            out.append(c)  # nothing to dedupe by — keep as-is
+            continue
+        if domain in seen:
+            removed += 1
+            continue
+        seen.add(domain)
+        out.append(c)
+    return out, removed
+
+
 def _company_header(company: dict[str, Any], source: str) -> str:
     name = company.get("name") or "(unnamed)"
     domain = company.get("primary_domain") or company.get("domain") or ""
@@ -206,18 +234,36 @@ def render() -> None:
             st.error(f"Apollo — {e}")
             return
 
-    orgs = result.get("organizations") or []
-    accounts = result.get("accounts") or []
+    orgs_raw = result.get("organizations") or []
+    accounts_raw = result.get("accounts") or []
     pagination = result.get("pagination") or {}
-    total_matching = pagination.get("total_entries", len(orgs) + len(accounts))
+    total_matching = pagination.get(
+        "total_entries", len(orgs_raw) + len(accounts_raw)
+    )
+
+    # Dedupe accounts first, then exclude their domains from organizations so
+    # the same company never shows in both sections.
+    accounts, acc_removed = _dedupe_by_domain(accounts_raw)
+    account_domains = {
+        (c.get("primary_domain") or c.get("domain") or "").strip().lower()
+        for c in accounts
+    }
+    orgs, org_removed = _dedupe_by_domain(orgs_raw, already_seen=account_domains)
+    total_removed = acc_removed + org_removed
 
     if not orgs and not accounts:
         st.info("No companies matched those filters. Try broadening the criteria.")
         return
 
+    dedup_note = (
+        f" ({total_removed} duplicate row{'s' if total_removed != 1 else ''} collapsed)"
+        if total_removed
+        else ""
+    )
     st.caption(
         f"Showing {len(orgs) + len(accounts)} of {total_matching:,} matches: "
-        f"**{len(orgs)} new leads**, **{len(accounts)} existing accounts**."
+        f"**{len(orgs)} new leads**, **{len(accounts)} existing accounts**"
+        f"{dedup_note}."
     )
 
     if orgs:
