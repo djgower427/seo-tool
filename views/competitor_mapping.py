@@ -14,13 +14,15 @@ seo_apollo.organization_search — remain available.)
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any
 
 import pandas as pd
 import streamlit as st
 
-from seo_keys import get_semrush_key, normalize_domain
+from seo_claude import ClaudeError, recommend_keyword_to_steal
+from seo_keys import get_anthropic_key, get_semrush_key, normalize_domain
 from seo_semrush import SemrushError, domain_organic_keywords
 
 DATABASES = ["us", "uk", "ca", "au", "de", "fr", "es", "it", "br", "in"]
@@ -28,6 +30,20 @@ DATABASES = ["us", "uk", "ca", "au", "de", "fr", "es", "it", "br", "in"]
 # Sketch's own domain — the "us" side of the keyword-gap comparison. Editable on
 # the page; this is just the default (inferred from the team's email domain).
 DEFAULT_OUR_DOMAIN = "sketchdev.io"
+
+# Editable default so the recommendation can filter keywords to Sketch's actual
+# offerings out of the box. Sourced from sketchdev.io; tweak on the page anytime.
+DEFAULT_OFFERINGS = (
+    "Sketch (sketchdev.io) is a US-based software development and consulting "
+    "firm. Core offerings: AI-enabled custom software / applications, "
+    "organizational and digital-transformation consulting, AWS cloud "
+    "enablement and optimization, and Atlassian tooling implementation. "
+    "Known for shipping working software every two weeks with no change orders. "
+    "Customers are Fortune 500 enterprises and mid-market businesses."
+)
+
+# How many candidates (easiest-first) to hand the recommender.
+_RECOMMEND_TOP_N = 40
 
 # Bump when a cached call's args or return shape changes so old entries expire.
 _CACHE_VERSION = 1
@@ -53,6 +69,26 @@ def _cached_organic_keywords(
 ) -> list[dict[str, str]]:
     del version
     return domain_organic_keywords(domain, database, api_key, limit=limit)
+
+
+@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
+def _cached_recommendation(
+    candidates_json: str,
+    offerings: str,
+    competitor: str,
+    ours: str,
+    api_key: str,
+    version: int,
+) -> str:
+    """candidates_json is a JSON string so the cache key stays hashable."""
+    del version
+    return recommend_keyword_to_steal(
+        json.loads(candidates_json),
+        offerings,
+        competitor_domain=competitor,
+        our_domain=ours,
+        api_key=api_key,
+    )
 
 
 def _steal_candidates(
@@ -140,8 +176,9 @@ def render() -> None:
     st.caption(
         "For a competitor domain, find the keywords Sketch could most easily "
         "steal — ones the competitor ranks for that we don't, filtered to low "
-        "difficulty and decent volume. Semrush charges ~10 credits per keyword "
-        "row, per domain."
+        "difficulty and decent volume — then get a Claude recommendation of "
+        "which one to target (kept to Sketch's core offerings) and what blog to "
+        "write. Semrush charges ~10 credits per keyword row, per domain."
     )
 
     semrush_key = get_semrush_key()
@@ -151,6 +188,7 @@ def render() -> None:
             "to `.streamlit/secrets.toml` locally."
         )
         st.stop()
+    anthropic_key = get_anthropic_key()
 
     with st.form("competitor-mapping-form"):
         c1, c2 = st.columns(2)
@@ -163,6 +201,16 @@ def render() -> None:
             "Our domain",
             value=DEFAULT_OUR_DOMAIN,
             help="Sketch's domain — the 'us' side of the keyword-gap comparison.",
+        )
+
+        offerings_input = st.text_area(
+            "Sketch's core offerings",
+            value=DEFAULT_OFFERINGS,
+            help=(
+                "Used to keep the recommendation focused — only keywords that "
+                "relate to these offerings will be suggested. Edit freely."
+            ),
+            height=120,
         )
 
         c3, c4 = st.columns(2)
@@ -211,6 +259,7 @@ def render() -> None:
         st.session_state["_cm_query"] = {
             "seed": normalize_domain(seed_input),
             "ours": normalize_domain(our_input),
+            "offerings": offerings_input.strip(),
             "database": database,
             "keyword_pool": int(keyword_pool),
             "max_difficulty": float(max_difficulty),
@@ -270,8 +319,39 @@ def render() -> None:
             "No steal-able keywords under these filters. Loosen the difficulty "
             "or volume thresholds, or widen the competitor position cap."
         )
+        return
+
+    # ── Recommendation ──────────────────────────────────────────────────────
+    st.subheader("⭐ Recommendation")
+    if not anthropic_key:
+        st.info(
+            "Set `ANTHROPIC_API_KEY` to get a written recommendation of which "
+            "keyword to target."
+        )
+    elif not q["offerings"]:
+        st.info(
+            "Add Sketch's core offerings in the form above to get a focused "
+            "recommendation."
+        )
     else:
-        _render_steal_table(candidates)
+        with st.spinner("Asking Claude which keyword to target…"):
+            try:
+                rec = _cached_recommendation(
+                    json.dumps(candidates[:_RECOMMEND_TOP_N], sort_keys=True),
+                    q["offerings"],
+                    q["seed"],
+                    q["ours"],
+                    anthropic_key,
+                    _CACHE_VERSION,
+                )
+            except ClaudeError as e:
+                st.error(f"Claude — {e}")
+                rec = None
+        if rec:
+            st.markdown(rec)
+
+    st.subheader("Steal-able keywords")
+    _render_steal_table(candidates)
 
 
 render()

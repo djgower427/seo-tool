@@ -251,3 +251,85 @@ def build_similar_company_query(
         "locations": locations,
         "rationale": (data.get("rationale") or "").strip(),
     }
+
+
+# The recommendation is a short, judgment-heavy writeup (relevance filtering +
+# prose), so it's worth the strongest model — the call is infrequent and the
+# output is one paragraph, so cost stays trivial.
+_RECOMMEND_MODEL = "claude-opus-4-8"
+
+
+def recommend_keyword_to_steal(
+    candidates: list[dict[str, Any]],
+    offerings: str,
+    *,
+    competitor_domain: str,
+    our_domain: str,
+    api_key: str,
+) -> str:
+    """One-paragraph recommendation of which keyword to target and how.
+
+    `candidates` are steal-able keyword rows (competitor ranks, we don't or rank
+    worse), each with Keyword / Volume / Difficulty / Competitor position / Our
+    position. `offerings` describes Sketch's core products/services — the model
+    is told to recommend ONLY keywords that clearly relate to them, and to say
+    so plainly if none do.
+
+    Returns a single markdown paragraph naming the keyword, why it's worth
+    pursuing, and what kind of blog post would help capture the traffic. Raises
+    ClaudeError on API errors or an empty response.
+    """
+    client = anthropic.Anthropic(api_key=api_key)
+
+    lines = []
+    for c in candidates:
+        our_pos = c.get("Our position")
+        our_str = f"#{our_pos}" if our_pos else "not ranking"
+        lines.append(
+            f"- \"{c.get('Keyword')}\" — volume {c.get('Volume')}, "
+            f"difficulty {c.get('Difficulty')}, competitor ranks "
+            f"#{c.get('Competitor position')}, we are {our_str}"
+        )
+    candidate_block = "\n".join(lines) if lines else "(none)"
+
+    prompt = (
+        "You advise Sketch (sketchdev.io) on SEO. Below are keywords the "
+        f"competitor {competitor_domain} ranks for that {our_domain} (Sketch) "
+        "does not rank for, or ranks worse for — i.e. keywords Sketch could try "
+        "to steal organic traffic for.\n\n"
+        f"Sketch's core offerings:\n{offerings.strip()}\n\n"
+        f"Candidate keywords (easiest first):\n{candidate_block}\n\n"
+        "Recommend which ONE keyword (occasionally two if they're closely "
+        "related) Sketch should target. Strict rule: only recommend a keyword "
+        "that clearly relates to Sketch's core offerings above — ignore keywords "
+        "about unrelated topics, the competitor's own brand, or products Sketch "
+        "doesn't sell, no matter how easy they look. If none of the candidates "
+        "genuinely relate to Sketch's offerings, say so plainly in one sentence "
+        "and recommend nothing.\n\n"
+        "Write a single concise paragraph (no headings, no bullet lists) that "
+        "names the keyword, explains why it's a good target (tie its volume and "
+        "difficulty to the relevance to Sketch's offerings), and describes the "
+        "kind of blog post Sketch should write to capture the traffic."
+    )
+
+    try:
+        response = client.messages.create(
+            model=_RECOMMEND_MODEL,
+            max_tokens=700,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except anthropic.AuthenticationError:
+        raise ClaudeError(
+            "Anthropic rejected the API key — check ANTHROPIC_API_KEY"
+        ) from None
+    except anthropic.RateLimitError:
+        raise ClaudeError(
+            "Anthropic rate limit hit — wait a minute and retry"
+        ) from None
+    except anthropic.APIError as e:
+        raise ClaudeError(f"Anthropic API error: {e}") from None
+
+    text = "".join(b.text for b in response.content if b.type == "text").strip()
+    if not text:
+        raise ClaudeError("Claude returned an empty recommendation")
+    return text
