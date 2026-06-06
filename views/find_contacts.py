@@ -91,9 +91,13 @@ def _person_row(p: dict[str, Any], revealed: dict[str, dict]) -> dict[str, Any]:
     # Apollo masks unrevealed emails as "email_not_unlocked@domain.com".
     email_revealed = bool(revealed_p) and "not_unlocked" not in (email or "")
 
+    first = (p.get("first_name") or "").strip()
+    last = (p.get("last_name") or "").strip()
+    full_name = f"{first} {last}".strip() or (p.get("name") or "").strip() or "—"
+
     return {
         "ID": pid,
-        "Name": p.get("name") or f"{p.get('first_name', '')} {p.get('last_name', '')}".strip() or "—",
+        "Name": full_name,
         "Title": p.get("title") or "—",
         "Seniority": p.get("seniority") or "—",
         "Company": org.get("name") or "—",
