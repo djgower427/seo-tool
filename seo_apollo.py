@@ -143,6 +143,8 @@ def organization_search(
     keywords: str | None = None,
     employees_min: int | None = None,
     employees_max: int | None = None,
+    revenue_min: int | None = None,
+    revenue_max: int | None = None,
     locations: list[str] | None = None,
     page: int = 1,
     per_page: int = 25,
@@ -157,7 +159,9 @@ def organization_search(
     description, industry, and detected technologies — handy for filters like
     "SaaS HubSpot" without needing technology UIDs. `employees_min`/`_max`
     map to organization_num_employees_ranges[] in the shape Apollo expects.
-    `locations` is a list of HQ location strings (countries, states, cities).
+    `revenue_min`/`_max` are raw USD ints; only the bounds the caller sets
+    are sent so an unbounded side stays unbounded. `locations` is a list of
+    HQ location strings (countries, states, cities).
     """
     body: dict[str, Any] = {
         "page": page,
@@ -169,6 +173,13 @@ def organization_search(
         lo = employees_min if employees_min is not None else 1
         hi = employees_max if employees_max is not None else 100000
         body["organization_num_employees_ranges"] = [f"{lo},{hi}"]
+    if revenue_min is not None or revenue_max is not None:
+        rrange: dict[str, int] = {}
+        if revenue_min is not None:
+            rrange["min"] = revenue_min
+        if revenue_max is not None:
+            rrange["max"] = revenue_max
+        body["revenue_range"] = rrange
     if locations:
         body["organization_locations"] = locations
 

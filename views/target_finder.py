@@ -20,7 +20,36 @@ import streamlit as st
 from seo_apollo import ApolloError, organization_search
 from seo_keys import get_apollo_key
 
-_SEARCH_CACHE_VERSION = 2
+_SEARCH_CACHE_VERSION = 3
+
+
+def _parse_money(s: str) -> int | None:
+    """Parse human-friendly money strings into raw USD ints.
+
+    Accepts '1M', '100K', '1.5B', '$10M', '10,000,000'. Returns None for
+    empty input. Raises ValueError on a non-empty input that doesn't parse —
+    caller surfaces the error to the user.
+    """
+    raw = s.strip()
+    if not raw:
+        return None
+    cleaned = raw.upper().replace("$", "").replace(",", "").replace(" ", "")
+    multiplier = 1
+    if cleaned.endswith("K"):
+        multiplier = 1_000
+        cleaned = cleaned[:-1]
+    elif cleaned.endswith("M"):
+        multiplier = 1_000_000
+        cleaned = cleaned[:-1]
+    elif cleaned.endswith("B"):
+        multiplier = 1_000_000_000
+        cleaned = cleaned[:-1]
+    try:
+        return int(float(cleaned) * multiplier)
+    except ValueError:
+        raise ValueError(
+            f"couldn't parse {raw!r} as a dollar amount (try '1M', '100K', '1.5B')"
+        ) from None
 
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
@@ -28,6 +57,8 @@ def _cached_company_search(
     keywords: str,
     employees_min: int,
     employees_max: int,
+    revenue_min: int | None,
+    revenue_max: int | None,
     locations_key: tuple[str, ...],
     per_page: int,
     api_key: str,
@@ -39,6 +70,8 @@ def _cached_company_search(
         keywords=keywords or None,
         employees_min=employees_min,
         employees_max=employees_max,
+        revenue_min=revenue_min,
+        revenue_max=revenue_max,
         locations=list(locations_key) or None,
         per_page=per_page,
     )
@@ -193,6 +226,17 @@ def render() -> None:
         c1, c2 = st.columns(2)
         emp_min = c1.number_input("Min employees", 1, 100000, 50)
         emp_max = c2.number_input("Max employees", 1, 100000, 200)
+        c3, c4 = st.columns(2)
+        rev_min_raw = c3.text_input(
+            "Min revenue",
+            placeholder="1M",
+            help="Accepts shorthand: 100K, 1M, 1.5B. Leave blank for no minimum.",
+        )
+        rev_max_raw = c4.text_input(
+            "Max revenue",
+            placeholder="100M",
+            help="Accepts shorthand: 100K, 1M, 1.5B. Leave blank for no maximum.",
+        )
         location_input = st.text_input(
             "HQ location",
             placeholder="United States",
@@ -207,10 +251,18 @@ def render() -> None:
         submitted = st.form_submit_button("Find companies", type="primary")
 
     if submitted:
+        try:
+            rev_min = _parse_money(rev_min_raw)
+            rev_max = _parse_money(rev_max_raw)
+        except ValueError as e:
+            st.error(str(e))
+            return
         st.session_state["_target_finder_query"] = {
             "keywords": keywords_input.strip(),
             "emp_min": int(emp_min),
             "emp_max": int(emp_max),
+            "rev_min": rev_min,
+            "rev_max": rev_max,
             "location": location_input.strip(),
             "max_companies": int(max_companies),
         }
@@ -225,6 +277,8 @@ def render() -> None:
                 query["keywords"],
                 query["emp_min"],
                 query["emp_max"],
+                query.get("rev_min"),
+                query.get("rev_max"),
                 (query["location"],) if query["location"] else (),
                 query["max_companies"],
                 apollo_key,
