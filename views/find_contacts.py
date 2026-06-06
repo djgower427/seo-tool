@@ -314,14 +314,9 @@ def render() -> None:
         f"(page {query['page']} of {total_pages})."
     )
 
-    # Auto-enrich any new IDs so the table shows full surnames (and any
-    # other data Apollo withholds from the search preview). Cached per
-    # session so we never re-pay for the same person.
+    # Surnames stay hidden until the user explicitly pays for them — Apollo's
+    # /people/match costs 1 credit per row even without an email reveal.
     enriched = _enriched_store()
-    _, enrich_errors = _auto_enrich(people, api_key)
-    for err in enrich_errors:
-        st.warning(f"Enrichment failed — {err}")
-
     rows = [_person_row(p, enriched) for p in people]
     event = _render_results_table(rows)
 
@@ -332,8 +327,16 @@ def render() -> None:
     )
     to_pay = len(selected_ids) - already_revealed
 
-    c1, c2 = st.columns([1, 3])
-    reveal_btn = c1.button(
+    # Count how many rows on this page still need a name reveal (i.e. aren't
+    # already cached from a prior reveal). 1 credit per row.
+    unrevealed_page_ids = [
+        (p.get("id") or "") for p in people
+        if p.get("id") and p["id"] not in enriched
+    ]
+    names_credit_cost = len(unrevealed_page_ids)
+
+    c1, c2, _ = st.columns([2, 2, 3])
+    reveal_emails_btn = c1.button(
         f"Reveal emails for {len(selected_ids)} selected ({to_pay} credits)",
         type="primary",
         disabled=len(selected_ids) == 0,
@@ -342,8 +345,17 @@ def render() -> None:
             "in this session and won't be re-billed."
         ) if already_revealed else None,
     )
+    reveal_names_btn = c2.button(
+        f"Reveal full names for this page ({names_credit_cost} credits)",
+        disabled=names_credit_cost == 0,
+        help=(
+            "Unlocks the surname Apollo withholds from the free search. "
+            "Rows you've already revealed (via email reveal or earlier name "
+            "reveal) aren't re-charged."
+        ),
+    )
 
-    if reveal_btn:
+    if reveal_emails_btn:
         ok, skipped, errors = _do_reveals(selected_ids, api_key)
         msg = f"Revealed {ok} new contact(s)."
         if skipped:
@@ -352,6 +364,13 @@ def render() -> None:
         for err in errors:
             st.error(f"Reveal failed — {err}")
         st.rerun()  # re-render table with revealed emails merged in
+
+    if reveal_names_btn:
+        ok, errors = _auto_enrich(people, api_key)
+        st.success(f"Revealed full names for {ok} contact(s).")
+        for err in errors:
+            st.error(f"Name reveal failed — {err}")
+        st.rerun()
 
     # Pagination — sits below the reveal action so users can act on the
     # current page before moving to the next.
