@@ -83,3 +83,78 @@ def organization_enrich(domain: str, api_key: str) -> dict[str, Any] | None:
     )
     org = payload.get("organization")
     return org if isinstance(org, dict) and org else None
+
+
+# Apollo's documented seniority enum. Surface in the UI so users don't guess.
+SENIORITIES = [
+    "owner",
+    "founder",
+    "c_suite",
+    "partner",
+    "vp",
+    "head",
+    "director",
+    "manager",
+    "senior",
+    "entry",
+    "intern",
+]
+
+
+def people_search(
+    domain: str,
+    api_key: str,
+    *,
+    titles: list[str] | None = None,
+    seniorities: list[str] | None = None,
+    page: int = 1,
+    per_page: int = 25,
+) -> dict[str, Any]:
+    """Search for people at a given company domain. FREE endpoint — no credits.
+
+    Returns the raw response so callers can use both `people` (the results
+    list) and `pagination` (total counts, page info). Emails are NOT returned
+    by this endpoint; each person record has an `id` to use with person_reveal().
+
+    Apollo accepts up to 1,000 domains per call but we expose one — most
+    "find contacts at this company" workflows are single-domain.
+    """
+    body: dict[str, Any] = {
+        "q_organization_domains_list": [domain],
+        "page": page,
+        "per_page": per_page,
+    }
+    if titles:
+        body["person_titles"] = titles
+    if seniorities:
+        body["person_seniorities"] = seniorities
+
+    return _request(
+        "POST",
+        "/mixed_people/api_search",
+        api_key,
+        json=body,
+    )
+
+
+def person_reveal(person_id: str, api_key: str) -> dict[str, Any] | None:
+    """Reveal contact details (incl. personal email) for one person.
+
+    COSTS CREDITS: 1 credit per successful personal-email reveal. Apollo
+    won't return a personal email for people in GDPR-protected regions —
+    no credit charged in that case, but the email field comes back masked
+    or null.
+
+    Returns the `person` dict from Apollo's response, or None if not found.
+    """
+    payload = _request(
+        "POST",
+        "/people/match",
+        api_key,
+        json={
+            "id": person_id,
+            "reveal_personal_emails": True,
+        },
+    )
+    person = payload.get("person")
+    return person if isinstance(person, dict) and person else None

@@ -20,6 +20,11 @@ nav = st.navigation(
             title="Full Site Status",
             icon="🌐",
         ),
+        st.Page(
+            "views/find_contacts.py",
+            title="Find Contacts",
+            icon="👥",
+        ),
     ]
 )
 nav.run()

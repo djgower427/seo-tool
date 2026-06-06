@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
-from urllib.parse import urlparse
 
 import pandas as pd
 import streamlit as st
 
 from seo_apollo import ApolloError, organization_enrich
+from seo_keys import get_apollo_key, get_semrush_key, normalize_domain
 from seo_semrush import (
     SemrushError,
     domain_overview,
@@ -19,28 +19,6 @@ from seo_semrush import (
 )
 
 DATABASES = ["us", "uk", "ca", "au", "de", "fr", "es", "it", "br", "in"]
-
-
-def get_semrush_key() -> str | None:
-    try:
-        return st.secrets.get("SEMRUSH_API_KEY")
-    except (FileNotFoundError, KeyError, AttributeError):
-        return None
-
-
-def get_apollo_key() -> str | None:
-    try:
-        return st.secrets.get("APOLLO_API_KEY")
-    except (FileNotFoundError, KeyError, AttributeError):
-        return None
-
-
-def normalize_domain(raw: str) -> str:
-    """Accept either a bare domain or a URL; return the bare host."""
-    raw = raw.strip().lower()
-    if "://" in raw:
-        raw = urlparse(raw).netloc or raw
-    return raw.lstrip("www.")
 
 
 def _to_int(value: str | None) -> int:
