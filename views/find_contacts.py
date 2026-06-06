@@ -17,7 +17,7 @@ from seo_apollo import (
     SENIORITIES,
     ApolloError,
     people_search,
-    person_reveal,
+    person_match,
 )
 from seo_claude import ClaudeError, expand_job_function
 from seo_keys import get_anthropic_key, get_apollo_key, normalize_domain
@@ -25,16 +25,22 @@ from seo_keys import get_anthropic_key, get_apollo_key, normalize_domain
 # Bump if the cached query / search return shape changes.
 _SEARCH_CACHE_VERSION = 3
 
-# Keys into st.session_state
-_REVEAL_CACHE_KEY = "_apollo_revealed_people"  # dict[person_id, dict]
+# Single per-session cache of best-known person data: search preview → basic
+# enrichment (full names) → email reveal. Each step merges over the prior one,
+# so we never re-pay for data we already have within a session.
+_ENRICH_CACHE_KEY = "_apollo_enriched_people"  # dict[person_id, dict]
 
 
-def _revealed_store() -> dict[str, dict[str, Any]]:
-    """Per-session map of person_id → revealed person dict. Stops double-billing
-    if the user clicks reveal twice on the same row within a session."""
-    if _REVEAL_CACHE_KEY not in st.session_state:
-        st.session_state[_REVEAL_CACHE_KEY] = {}
-    return st.session_state[_REVEAL_CACHE_KEY]
+def _enriched_store() -> dict[str, dict[str, Any]]:
+    if _ENRICH_CACHE_KEY not in st.session_state:
+        st.session_state[_ENRICH_CACHE_KEY] = {}
+    return st.session_state[_ENRICH_CACHE_KEY]
+
+
+def _email_revealed(person: dict[str, Any]) -> bool:
+    """True iff this cached person dict carries an unlocked personal email."""
+    email = (person or {}).get("email") or ""
+    return bool(email) and "not_unlocked" not in email
 
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
@@ -76,33 +82,30 @@ def _cached_expand_function(
     return tuple(titles)
 
 
-def _person_row(p: dict[str, Any], revealed: dict[str, dict]) -> dict[str, Any]:
-    """Flatten one Apollo person preview into a table row. Merges in any
-    revealed email/phone we already paid for this session."""
+def _person_row(p: dict[str, Any], enriched: dict[str, dict]) -> dict[str, Any]:
+    """Flatten one Apollo person record into a table row. Prefers the enriched
+    copy (full surname, unlocked email if revealed) over the search preview."""
     pid = p.get("id") or ""
-    org = p.get("organization") or {}
-    location_parts = [p.get("city"), p.get("state"), p.get("country")]
+    src = enriched.get(pid) or p  # enriched data wins where present
+    org = src.get("organization") or p.get("organization") or {}
+    location_parts = [src.get("city"), src.get("state"), src.get("country")]
     location = ", ".join(x for x in location_parts if x) or "—"
 
-    # Prefer revealed data (with real email) if we have it; otherwise show the
-    # masked email Apollo returns for unrevealed people.
-    revealed_p = revealed.get(pid, {})
-    email = revealed_p.get("email") or p.get("email") or ""
-    # Apollo masks unrevealed emails as "email_not_unlocked@domain.com".
-    email_revealed = bool(revealed_p) and "not_unlocked" not in (email or "")
+    first = (src.get("first_name") or "").strip()
+    last = (src.get("last_name") or "").strip()
+    full_name = f"{first} {last}".strip() or (src.get("name") or "").strip() or "—"
 
-    first = (p.get("first_name") or "").strip()
-    last = (p.get("last_name") or "").strip()
-    full_name = f"{first} {last}".strip() or (p.get("name") or "").strip() or "—"
+    email = src.get("email") or ""
+    email_revealed = _email_revealed(src)
 
     return {
         "ID": pid,
         "Name": full_name,
-        "Title": p.get("title") or "—",
-        "Seniority": p.get("seniority") or "—",
+        "Title": src.get("title") or "—",
+        "Seniority": src.get("seniority") or "—",
         "Company": org.get("name") or "—",
         "Location": location,
-        "LinkedIn": p.get("linkedin_url") or "",
+        "LinkedIn": src.get("linkedin_url") or p.get("linkedin_url") or "",
         "Email": email if email_revealed else ("🔒 hidden" if email else "—"),
         "_revealed": email_revealed,
     }
@@ -130,10 +133,14 @@ def _do_reveals(
     selected_ids: list[str],
     api_key: str,
 ) -> tuple[int, int, list[str]]:
-    """Call person_reveal for each unrevealed selected ID. Returns
-    (revealed_count, skipped_already_revealed_count, errors)."""
-    revealed = _revealed_store()
-    to_reveal = [pid for pid in selected_ids if pid and pid not in revealed]
+    """Reveal emails for selected rows. Skips IDs whose cached record already
+    has an unlocked email (avoids double-billing). Returns
+    (newly_revealed_count, skipped_already_revealed_count, errors)."""
+    enriched = _enriched_store()
+    to_reveal = [
+        pid for pid in selected_ids
+        if pid and not _email_revealed(enriched.get(pid) or {})
+    ]
     skipped = len(selected_ids) - len(to_reveal)
     errors: list[str] = []
 
@@ -143,15 +150,51 @@ def _do_reveals(
     progress = st.progress(0.0, text=f"Revealing 0 / {len(to_reveal)}…")
     for i, pid in enumerate(to_reveal, start=1):
         try:
-            person = person_reveal(pid, api_key)
+            person = person_match(pid, api_key, reveal_personal_emails=True)
             if person:
-                revealed[pid] = person
+                enriched[pid] = person
         except ApolloError as e:
             errors.append(f"{pid}: {e}")
         progress.progress(i / len(to_reveal), text=f"Revealing {i} / {len(to_reveal)}…")
     progress.empty()
 
     return len(to_reveal) - len(errors), skipped, errors
+
+
+def _auto_enrich(
+    people: list[dict[str, Any]],
+    api_key: str,
+) -> tuple[int, list[str]]:
+    """Call /people/match (without reveal_personal_emails) for any person not
+    already in the enrichment cache. Returns (enriched_count, errors)."""
+    enriched = _enriched_store()
+    todo = [
+        (p.get("id") or "")
+        for p in people
+        if p.get("id") and p["id"] not in enriched
+    ]
+    todo = [pid for pid in todo if pid]
+    if not todo:
+        return 0, []
+
+    errors: list[str] = []
+    progress = st.progress(
+        0.0,
+        text=f"Enriching 0 / {len(todo)} contacts via Apollo…",
+    )
+    for i, pid in enumerate(todo, start=1):
+        try:
+            person = person_match(pid, api_key, reveal_personal_emails=False)
+            if person:
+                enriched[pid] = person
+        except ApolloError as e:
+            errors.append(f"{pid}: {e}")
+        progress.progress(
+            i / len(todo),
+            text=f"Enriching {i} / {len(todo)} contacts via Apollo…",
+        )
+    progress.empty()
+    return len(todo) - len(errors), errors
 
 
 def render() -> None:
@@ -271,13 +314,22 @@ def render() -> None:
         f"(page {query['page']} of {total_pages})."
     )
 
-    revealed = _revealed_store()
-    rows = [_person_row(p, revealed) for p in people]
+    # Auto-enrich any new IDs so the table shows full surnames (and any
+    # other data Apollo withholds from the search preview). Cached per
+    # session so we never re-pay for the same person.
+    enriched = _enriched_store()
+    _, enrich_errors = _auto_enrich(people, api_key)
+    for err in enrich_errors:
+        st.warning(f"Enrichment failed — {err}")
+
+    rows = [_person_row(p, enriched) for p in people]
     event = _render_results_table(rows)
 
     selected_indices = list(getattr(event.selection, "rows", []) or [])
     selected_ids = [rows[i]["ID"] for i in selected_indices]
-    already_revealed = sum(1 for pid in selected_ids if pid in revealed)
+    already_revealed = sum(
+        1 for pid in selected_ids if _email_revealed(enriched.get(pid) or {})
+    )
     to_pay = len(selected_ids) - already_revealed
 
     c1, c2 = st.columns([1, 3])

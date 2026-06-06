@@ -137,13 +137,27 @@ def people_search(
     )
 
 
-def person_reveal(person_id: str, api_key: str) -> dict[str, Any] | None:
-    """Reveal contact details (incl. personal email) for one person.
+def person_match(
+    person_id: str,
+    api_key: str,
+    *,
+    reveal_personal_emails: bool = False,
+) -> dict[str, Any] | None:
+    """Enrich one person via Apollo's /people/match endpoint.
 
-    COSTS CREDITS: 1 credit per successful personal-email reveal. Apollo
-    won't return a personal email for people in GDPR-protected regions —
-    no credit charged in that case, but the email field comes back masked
-    or null.
+    Without `reveal_personal_emails`, returns basic enrichment fields:
+    un-obfuscated first/last name, title, seniority, organization, location,
+    linkedin_url, etc. The search-preview endpoint returns last_name as just
+    an initial; only /people/match gives you the full surname.
+
+    With `reveal_personal_emails=True`, also returns the personal email and
+    consumes additional credits per Apollo's pricing. Apollo won't reveal
+    emails in GDPR-protected regions — no credit charged in that case, but
+    the email field comes back masked or null.
+
+    Apollo's docs are vague on whether the bare match call (without reveals)
+    consumes credits — callers should watch their balance on the first
+    request to confirm.
 
     Returns the `person` dict from Apollo's response, or None if not found.
     """
@@ -153,8 +167,16 @@ def person_reveal(person_id: str, api_key: str) -> dict[str, Any] | None:
         api_key,
         json={
             "id": person_id,
-            "reveal_personal_emails": True,
+            "reveal_personal_emails": reveal_personal_emails,
         },
     )
     person = payload.get("person")
     return person if isinstance(person, dict) and person else None
+
+
+# Back-compat alias for the original name-revealing call.
+def person_reveal(person_id: str, api_key: str) -> dict[str, Any] | None:
+    """Reveal contact details (incl. personal email) for one person.
+    Thin wrapper around person_match(..., reveal_personal_emails=True).
+    """
+    return person_match(person_id, api_key, reveal_personal_emails=True)
