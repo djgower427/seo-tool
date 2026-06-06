@@ -212,6 +212,11 @@ def render() -> None:
         )
         st.stop()
 
+    # Persist the user's per-page preference across searches so changing it
+    # after a search sticks.
+    if "_per_page" not in st.session_state:
+        st.session_state["_per_page"] = 25
+
     with st.form("find-contacts-form"):
         domain_input = st.text_input(
             "Company domain", placeholder="stripe.com",
@@ -232,7 +237,6 @@ def render() -> None:
             default=[],
             help="Apollo's defined seniority buckets. Leave empty for all.",
         )
-        per_page = st.selectbox("Results per page", [10, 25, 50, 100], index=1)
         submitted = st.form_submit_button("Search (free)", type="primary")
 
     # On submit: expand the function to titles via Claude (if non-empty),
@@ -268,7 +272,7 @@ def render() -> None:
             "titles": titles,
             "seniorities": seniorities,
             "page": 1,
-            "per_page": int(per_page),
+            "per_page": int(st.session_state["_per_page"]),
         }
 
     query = st.session_state.get("_find_contacts_query")
@@ -370,6 +374,20 @@ def render() -> None:
         st.success(f"Revealed full names for {ok} contact(s).")
         for err in errors:
             st.error(f"Name reveal failed — {err}")
+        st.rerun()
+
+    # Results-per-page selector lives here (not in the form) so users can
+    # change it after they see the result count.
+    per_page_col, _ = st.columns([1, 3])
+    per_page_col.selectbox(
+        "Results per page",
+        [10, 25, 50, 100],
+        key="_per_page",
+    )
+    if st.session_state["_per_page"] != query["per_page"]:
+        query["per_page"] = int(st.session_state["_per_page"])
+        query["page"] = 1
+        st.session_state["_find_contacts_query"] = query
         st.rerun()
 
     # Pagination — sits below the reveal action so users can act on the
