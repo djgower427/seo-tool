@@ -1,9 +1,8 @@
 """Target Finder — build company target lists from criteria.
 
-Company search via Apollo's /mixed_companies/search consumes ~1 credit per
-submission. Per-company contact lookups use the free people api_search
-endpoint and are triggered on demand (one click per company) so credits
-aren't spent on companies the user isn't interested in.
+Company search via Apollo's /mixed_companies/search consumes credits per call.
+This page is company-discovery only: to dig into contacts at a target, use
+the Find Contacts page with the domain.
 """
 
 from __future__ import annotations
@@ -14,26 +13,10 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from seo_apollo import (
-    SENIORITIES,
-    ApolloError,
-    organization_search,
-    people_search,
-)
-from seo_claude import ClaudeError, expand_job_function
-from seo_keys import get_anthropic_key, get_apollo_key
+from seo_apollo import ApolloError, organization_search
+from seo_keys import get_apollo_key
 
 _SEARCH_CACHE_VERSION = 1
-
-# Session state: domain → list of people dicts. Populated lazily when the user
-# clicks "Show contacts" on a company; survives reruns so we don't re-fetch.
-_CONTACTS_STORE_KEY = "_target_finder_contacts"
-
-
-def _contacts_store() -> dict[str, list[dict[str, Any]]]:
-    if _CONTACTS_STORE_KEY not in st.session_state:
-        st.session_state[_CONTACTS_STORE_KEY] = {}
-    return st.session_state[_CONTACTS_STORE_KEY]
 
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
@@ -57,39 +40,90 @@ def _cached_company_search(
     )
 
 
-@st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=False)
-def _cached_expand_function(
-    function: str,
-    seniorities_key: tuple[str, ...],
-    api_key: str,
-    version: int,
-) -> tuple[str, ...]:
-    del version
-    titles = expand_job_function(
-        function, api_key, seniorities=list(seniorities_key) or None
+def _first(d: dict, *keys: str) -> Any:
+    """Return the first truthy value across the given keys. Apollo's response
+    shape varies between endpoints (search vs enrich), so we probe several
+    common names per logical field."""
+    for k in keys:
+        v = d.get(k)
+        if v not in (None, "", [], {}):
+            return v
+    return None
+
+
+def _company_employees(c: dict[str, Any]) -> str:
+    v = _first(
+        c,
+        "estimated_num_employees",
+        "num_employees",
+        "employee_count",
+        "employees",
     )
-    return tuple(titles)
+    try:
+        return f"{int(v):,}" if v is not None else "—"
+    except (TypeError, ValueError):
+        return str(v) if v else "—"
+
+
+def _company_industry(c: dict[str, Any]) -> str:
+    v = _first(c, "industry", "primary_industry", "industry_tag")
+    if isinstance(v, str) and v:
+        return v.title()
+    return "—"
+
+
+def _company_location(c: dict[str, Any]) -> str:
+    # Try flat city/state/country first, then a nested headquarters object,
+    # then a raw_address fallback.
+    parts = [c.get("city"), c.get("state"), c.get("country")]
+    flat = ", ".join(p for p in parts if p)
+    if flat:
+        return flat
+
+    hq = c.get("headquarters") or c.get("primary_headquarters_address") or {}
+    if isinstance(hq, dict):
+        parts = [hq.get("city"), hq.get("state"), hq.get("country")]
+        nested = ", ".join(p for p in parts if p)
+        if nested:
+            return nested
+
+    raw = c.get("raw_address") or c.get("address")
+    return raw or "—"
+
+
+def _company_technologies(c: dict[str, Any]) -> list[str]:
+    techs = _first(c, "technology_names", "current_technologies", "technologies") or []
+    out: list[str] = []
+    for t in techs:
+        if isinstance(t, str):
+            out.append(t)
+        elif isinstance(t, dict) and t.get("name"):
+            out.append(t["name"])
+    return out
+
+
+def _build_tech_html(tech_names: list[str]) -> str:
+    """Show the first 8 techs inline; the rest collapse behind a native HTML
+    <details> "see N more" toggle. Inline expand, no Streamlit rerun."""
+    if len(tech_names) <= 8:
+        return ", ".join(html.escape(t) for t in tech_names)
+
+    first = ", ".join(html.escape(t) for t in tech_names[:8])
+    rest = ", ".join(html.escape(t) for t in tech_names[8:])
+    return (
+        f"{first}, "
+        f'<details style="display:inline">'
+        f'<summary style="display:inline;cursor:pointer;color:#16a34a">'
+        f"see {len(tech_names) - 8} more</summary> "
+        f"{rest}</details>"
+    )
 
 
 def _render_company_summary(company: dict[str, Any]) -> None:
-    location_parts = [company.get("city"), company.get("state"), company.get("country")]
-    location = ", ".join(p for p in location_parts if p) or "—"
-    industry = (company.get("industry") or "").title() or "—"
-    employees = company.get("estimated_num_employees")
-    employees_str = f"{int(employees):,}" if employees else "—"
-
-    techs = company.get("technology_names") or company.get("current_technologies") or []
-    tech_names: list[str] = []
-    for t in techs:
-        if isinstance(t, str):
-            tech_names.append(t)
-        elif isinstance(t, dict) and t.get("name"):
-            tech_names.append(t["name"])
-
     rows = [
-        ("Employees", employees_str),
-        ("Industry", industry),
-        ("HQ", location),
+        ("Employees", _company_employees(company)),
+        ("Industry", _company_industry(company)),
+        ("HQ", _company_location(company)),
     ]
     st.dataframe(
         pd.DataFrame(rows, columns=["Field", "Value"]),
@@ -97,6 +131,7 @@ def _render_company_summary(company: dict[str, Any]) -> None:
         hide_index=True,
     )
 
+    tech_names = _company_technologies(company)
     if tech_names:
         st.markdown(
             "**Tech:** " + _build_tech_html(tech_names),
@@ -115,123 +150,18 @@ def _render_company_summary(company: dict[str, Any]) -> None:
     if links:
         st.markdown(" · ".join(links))
 
-
-def _build_tech_html(tech_names: list[str]) -> str:
-    """Show the first 8 techs inline; the rest collapse behind a native HTML
-    <details> "see N more" toggle. html.escape() because Apollo's data
-    isn't user-controlled but neither is it strictly trusted."""
-    if len(tech_names) <= 8:
-        return ", ".join(html.escape(t) for t in tech_names)
-
-    first = ", ".join(html.escape(t) for t in tech_names[:8])
-    rest = ", ".join(html.escape(t) for t in tech_names[8:])
-    return (
-        f"{first}, "
-        f'<details style="display:inline">'
-        f'<summary style="display:inline;cursor:pointer;color:#16a34a">'
-        f"see {len(tech_names) - 8} more</summary> "
-        f"{rest}</details>"
-    )
-
-
-def _render_contacts_section(
-    company: dict[str, Any],
-    query: dict[str, Any],
-    apollo_key: str,
-) -> None:
-    domain = company.get("primary_domain") or company.get("website_url") or ""
-    if not domain:
-        st.caption("No domain available for contact lookup.")
-        return
-
-    store = _contacts_store()
-    if domain in store:
-        people = store[domain]
-        if not people:
-            st.caption(
-                "No contacts at this domain match the contact filters. "
-                "Try widening Job function or removing seniority filters."
-            )
-            return
-        rows = [
-            {
-                "Name (first)": p.get("first_name") or "—",
-                "Title": p.get("title") or "—",
-                "Seniority": p.get("seniority") or "—",
-            }
-            for p in people
-        ]
-        st.dataframe(
-            pd.DataFrame(rows),
-            use_container_width=True,
-            hide_index=True,
-        )
-        st.caption(
-            f"To reveal full names + emails for these contacts, open the "
-            f"**Find Contacts** page and search `{domain}`."
-        )
-        return
-
-    # Not yet fetched — show button
-    if st.button(
-        f"Show contacts at {domain} (free)",
-        key=f"contacts-{domain}",
-    ):
-        _fetch_contacts(domain, query, apollo_key)
-
-
-def _fetch_contacts(
-    domain: str,
-    query: dict[str, Any],
-    apollo_key: str,
-) -> None:
-    """Expand the job function via Claude (if set), then call Apollo. Store
-    the result in session state and rerun."""
-    function = query.get("function") or ""
-    seniorities = query.get("seniorities") or []
-    titles: list[str] = []
-
-    if function:
-        anthropic_key = get_anthropic_key()
-        if not anthropic_key:
-            st.error(
-                "`ANTHROPIC_API_KEY` is not set. Leave Job function blank or "
-                "add the key to Streamlit Cloud Secrets."
-            )
-            return
-        try:
-            titles = list(_cached_expand_function(
-                function,
-                tuple(seniorities),
-                anthropic_key,
-                _SEARCH_CACHE_VERSION,
-            ))
-        except ClaudeError as e:
-            st.error(f"Claude — {e}")
-            return
-
-    try:
-        result = people_search(
-            domain,
-            apollo_key,
-            titles=titles or None,
-            seniorities=seniorities or None,
-            per_page=10,
-        )
-    except ApolloError as e:
-        st.error(f"Apollo — {e}")
-        return
-
-    _contacts_store()[domain] = result.get("people") or []
-    st.rerun()
+    # Per-company raw data expander so we can fix field mappings if the
+    # defensive reads above missed anything.
+    with st.expander("Show raw company data", expanded=False):
+        st.json(company)
 
 
 def render() -> None:
     st.title("🎯 Target Finder")
     st.caption(
-        "Find companies matching your criteria, then drill into key contacts. "
-        "Company search consumes ~1 Apollo credit per submission. Contact "
-        "lookups are free."
+        "Find companies matching your criteria. Company search consumes "
+        "Apollo credits per submission. To dig into contacts at a target, "
+        "open it on the Find Contacts page."
     )
 
     apollo_key = get_apollo_key()
@@ -243,7 +173,6 @@ def render() -> None:
         st.stop()
 
     with st.form("target-finder-form"):
-        st.markdown("**Company filters**")
         keywords_input = st.text_input(
             "Industry / keywords / technology",
             placeholder="SaaS HubSpot",
@@ -266,24 +195,13 @@ def render() -> None:
             "Companies per search",
             [10, 25, 50, 100],
             index=1,
-        )
-
-        st.markdown("**Contact filters** (used when expanding a company)")
-        function_input = st.text_input(
-            "Job function",
-            placeholder="e.g. marketing leadership, head of growth",
             help=(
-                "Plain-language description of the role. Claude expands this "
-                "into concrete job titles before searching for contacts."
+                "Apollo may silently return fewer than requested depending on "
+                "your plan tier."
             ),
         )
-        seniorities = st.multiselect(
-            "Seniority",
-            options=SENIORITIES,
-            default=["c_suite", "vp", "head", "director"],
-        )
 
-        submitted = st.form_submit_button("Find companies (1 credit)", type="primary")
+        submitted = st.form_submit_button("Find companies", type="primary")
 
     if submitted:
         st.session_state["_target_finder_query"] = {
@@ -292,11 +210,7 @@ def render() -> None:
             "emp_max": int(emp_max),
             "location": location_input.strip(),
             "max_companies": int(max_companies),
-            "function": function_input.strip(),
-            "seniorities": seniorities,
         }
-        # Wipe stale contacts so previous-search expansions don't leak in.
-        st.session_state[_CONTACTS_STORE_KEY] = {}
 
     query = st.session_state.get("_target_finder_query")
     if not query:
@@ -325,8 +239,16 @@ def render() -> None:
         st.info("No companies matched those filters. Try broadening the criteria.")
         return
 
+    capped_note = ""
+    if len(companies) < query["max_companies"]:
+        capped_note = (
+            f" — Apollo returned fewer than the {query['max_companies']} requested. "
+            "Likely a plan-tier cap; refine filters or upgrade plan to see more."
+        )
+
     st.caption(
-        f"Showing {len(companies)} of {total:,} companies matching your filters."
+        f"Showing {len(companies)} of {total:,} companies matching your "
+        f"filters{capped_note}."
     )
 
     for company in companies:
@@ -334,9 +256,8 @@ def render() -> None:
         domain = company.get("primary_domain") or company.get("website_url") or ""
         with st.expander(f"**{name}** — {domain}"):
             _render_company_summary(company)
-            _render_contacts_section(company, query, apollo_key)
 
-    with st.expander("Debug: raw Apollo response"):
+    with st.expander("Debug: raw Apollo search response"):
         st.json(result)
 
 
