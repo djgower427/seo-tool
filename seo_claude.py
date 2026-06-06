@@ -333,3 +333,49 @@ def recommend_keyword_to_steal(
     if not text:
         raise ClaudeError("Claude returned an empty recommendation")
     return text
+
+
+# Homepages are long; cap what we send to keep the summary call cheap.
+_OFFERINGS_MAX_CHARS = 8000
+
+
+def summarize_offerings(domain: str, page_text: str, api_key: str) -> str:
+    """Summarize a domain's core products/services from its homepage text.
+
+    `page_text` is the visible text scraped from the domain's homepage (title +
+    meta + body). Returns a 2-4 sentence description of what the company offers
+    and who it serves — the grounding the keyword recommender filters against.
+    Raises ClaudeError on API errors or an empty response.
+    """
+    client = anthropic.Anthropic(api_key=api_key)
+
+    prompt = (
+        f"Below is the homepage text for {domain}. Summarize the company's core "
+        "products, services, and offerings, and who its customers are, in 2-4 "
+        "plain sentences. Focus on what they actually sell — ignore navigation, "
+        "boilerplate, and marketing fluff. Do not invent details not supported "
+        "by the text.\n\n"
+        f"Homepage text:\n{page_text[:_OFFERINGS_MAX_CHARS]}"
+    )
+
+    try:
+        response = client.messages.create(
+            model=_MODEL,
+            max_tokens=400,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except anthropic.AuthenticationError:
+        raise ClaudeError(
+            "Anthropic rejected the API key — check ANTHROPIC_API_KEY"
+        ) from None
+    except anthropic.RateLimitError:
+        raise ClaudeError(
+            "Anthropic rate limit hit — wait a minute and retry"
+        ) from None
+    except anthropic.APIError as e:
+        raise ClaudeError(f"Anthropic API error: {e}") from None
+
+    text = "".join(b.text for b in response.content if b.type == "text").strip()
+    if not text:
+        raise ClaudeError("Claude returned an empty offerings summary")
+    return text
