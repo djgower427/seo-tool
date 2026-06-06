@@ -1,13 +1,17 @@
 """Target Finder — build company target lists from criteria.
 
 Company search via Apollo's /mixed_companies/search consumes credits per call.
-This page is company-discovery only: to dig into contacts at a target, use
-the Find Contacts page with the domain.
+The endpoint returns matches split across two arrays — `accounts` (companies
+already in your Apollo workspace) and `organizations` (new matches from
+Apollo's broader DB) — and we display both, tagged by source.
+
+Apollo's search endpoint returns slimmer records than enrichment: no industry,
+exact employee count, or technology stack. Those require a per-company
+enrichment call (use Full Site Status for a specific domain).
 """
 
 from __future__ import annotations
 
-import html
 from typing import Any
 
 import pandas as pd
@@ -16,7 +20,7 @@ import streamlit as st
 from seo_apollo import ApolloError, organization_search
 from seo_keys import get_apollo_key
 
-_SEARCH_CACHE_VERSION = 1
+_SEARCH_CACHE_VERSION = 2
 
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
@@ -40,103 +44,71 @@ def _cached_company_search(
     )
 
 
-def _first(d: dict, *keys: str) -> Any:
-    """Return the first truthy value across the given keys. Apollo's response
-    shape varies between endpoints (search vs enrich), so we probe several
-    common names per logical field."""
-    for k in keys:
-        v = d.get(k)
-        if v not in (None, "", [], {}):
-            return v
-    return None
-
-
-def _company_employees(c: dict[str, Any]) -> str:
-    v = _first(
-        c,
-        "estimated_num_employees",
-        "num_employees",
-        "employee_count",
-        "employees",
-    )
+def _fmt_money(v: Any) -> str:
+    """Format a raw USD number into 1.2M / 1.2B style. Apollo also gives us
+    `organization_revenue_printed` which is already formatted — prefer that
+    when present."""
     try:
-        return f"{int(v):,}" if v is not None else "—"
+        n = float(v)
     except (TypeError, ValueError):
-        return str(v) if v else "—"
-
-
-def _company_industry(c: dict[str, Any]) -> str:
-    v = _first(c, "industry", "primary_industry", "industry_tag")
-    if isinstance(v, str) and v:
-        return v.title()
-    return "—"
+        return "—"
+    if n <= 0:
+        return "—"
+    if n >= 1_000_000_000:
+        return f"${n / 1_000_000_000:.1f}B"
+    if n >= 1_000_000:
+        return f"${n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"${n / 1_000:.0f}K"
+    return f"${n:,.0f}"
 
 
 def _company_location(c: dict[str, Any]) -> str:
-    # Try flat city/state/country first, then a nested headquarters object,
-    # then a raw_address fallback.
-    parts = [c.get("city"), c.get("state"), c.get("country")]
-    flat = ", ".join(p for p in parts if p)
-    if flat:
-        return flat
-
-    hq = c.get("headquarters") or c.get("primary_headquarters_address") or {}
-    if isinstance(hq, dict):
-        parts = [hq.get("city"), hq.get("state"), hq.get("country")]
-        nested = ", ".join(p for p in parts if p)
-        if nested:
-            return nested
-
-    raw = c.get("raw_address") or c.get("address")
-    return raw or "—"
-
-
-def _company_technologies(c: dict[str, Any]) -> list[str]:
-    techs = _first(c, "technology_names", "current_technologies", "technologies") or []
-    out: list[str] = []
-    for t in techs:
-        if isinstance(t, str):
-            out.append(t)
-        elif isinstance(t, dict) and t.get("name"):
-            out.append(t["name"])
-    return out
-
-
-def _build_tech_html(tech_names: list[str]) -> str:
-    """Show the first 8 techs inline; the rest collapse behind a native HTML
-    <details> "see N more" toggle. Inline expand, no Streamlit rerun."""
-    if len(tech_names) <= 8:
-        return ", ".join(html.escape(t) for t in tech_names)
-
-    first = ", ".join(html.escape(t) for t in tech_names[:8])
-    rest = ", ".join(html.escape(t) for t in tech_names[8:])
-    return (
-        f"{first}, "
-        f'<details style="display:inline">'
-        f'<summary style="display:inline;cursor:pointer;color:#16a34a">'
-        f"see {len(tech_names) - 8} more</summary> "
-        f"{rest}</details>"
-    )
+    """Flat city/state/country are populated on `accounts` but missing on most
+    `organizations`. Probe the `organization_*` prefixed variants too."""
+    parts = [
+        c.get("city") or c.get("organization_city"),
+        c.get("state") or c.get("organization_state"),
+        c.get("country") or c.get("organization_country"),
+    ]
+    return ", ".join(p for p in parts if p) or "—"
 
 
 def _render_company_summary(company: dict[str, Any]) -> None:
+    revenue_printed = company.get("organization_revenue_printed")
+    revenue = f"${revenue_printed}" if revenue_printed else _fmt_money(company.get("organization_revenue"))
+
+    founded = company.get("founded_year")
+    founded_str = str(int(founded)) if founded else "—"
+
+    location = _company_location(company)
+
+    phone_obj = company.get("primary_phone")
+    phone = (
+        phone_obj.get("number") if isinstance(phone_obj, dict) else company.get("phone")
+    ) or "—"
+
+    num_contacts = company.get("num_contacts")
+    contacts_str = f"{int(num_contacts):,}" if num_contacts is not None else "—"
+
+    growth_12mo = company.get("organization_headcount_twelve_month_growth")
+    growth_str = (
+        f"{growth_12mo * 100:+.1f}%" if isinstance(growth_12mo, (int, float)) else "—"
+    )
+
     rows = [
-        ("Employees", _company_employees(company)),
-        ("Industry", _company_industry(company)),
-        ("HQ", _company_location(company)),
+        ("Revenue", revenue),
+        ("HQ", location),
+        ("Founded", founded_str),
+        ("Phone", phone),
+        ("# Contacts in Apollo", contacts_str),
+        ("12mo headcount growth", growth_str),
     ]
     st.dataframe(
         pd.DataFrame(rows, columns=["Field", "Value"]),
         use_container_width=True,
         hide_index=True,
     )
-
-    tech_names = _company_technologies(company)
-    if tech_names:
-        st.markdown(
-            "**Tech:** " + _build_tech_html(tech_names),
-            unsafe_allow_html=True,
-        )
 
     links = []
     for label, key in [
@@ -150,18 +122,25 @@ def _render_company_summary(company: dict[str, Any]) -> None:
     if links:
         st.markdown(" · ".join(links))
 
-    # Per-company raw data expander so we can fix field mappings if the
-    # defensive reads above missed anything.
     with st.expander("Show raw company data", expanded=False):
         st.json(company)
+
+
+def _company_header(company: dict[str, Any], source: str) -> str:
+    name = company.get("name") or "(unnamed)"
+    domain = company.get("primary_domain") or company.get("domain") or ""
+    tag = "🆕 New lead" if source == "organization" else "📁 Existing account"
+    return f"{tag} · **{name}** — {domain}"
 
 
 def render() -> None:
     st.title("🎯 Target Finder")
     st.caption(
         "Find companies matching your criteria. Company search consumes "
-        "Apollo credits per submission. To dig into contacts at a target, "
-        "open it on the Find Contacts page."
+        "Apollo credits per submission. Results are split into new leads "
+        "(not yet in your Apollo workspace) and existing accounts. To enrich "
+        "a target with industry / employees / tech stack, run it through "
+        "**Full Site Status**."
     )
 
     apollo_key = get_apollo_key()
@@ -179,8 +158,8 @@ def render() -> None:
             help=(
                 "Free-text fuzzy search across company name, description, "
                 "industry, and detected technologies. Combine terms freely — "
-                "e.g. \"SaaS HubSpot\" matches B2B SaaS companies that "
-                "Apollo has tagged as HubSpot users."
+                "e.g. \"SaaS HubSpot\" matches B2B SaaS companies that Apollo "
+                "has tagged as HubSpot users."
             ),
         )
         c1, c2 = st.columns(2)
@@ -195,10 +174,6 @@ def render() -> None:
             "Companies per search",
             [10, 25, 50, 100],
             index=1,
-            help=(
-                "Apollo may silently return fewer than requested depending on "
-                "your plan tier."
-            ),
         )
 
         submitted = st.form_submit_button("Find companies", type="primary")
@@ -231,31 +206,35 @@ def render() -> None:
             st.error(f"Apollo — {e}")
             return
 
-    companies = result.get("organizations") or []
+    orgs = result.get("organizations") or []
+    accounts = result.get("accounts") or []
     pagination = result.get("pagination") or {}
-    total = pagination.get("total_entries", len(companies))
+    total_matching = pagination.get("total_entries", len(orgs) + len(accounts))
 
-    if not companies:
+    if not orgs and not accounts:
         st.info("No companies matched those filters. Try broadening the criteria.")
         return
 
-    capped_note = ""
-    if len(companies) < query["max_companies"]:
-        capped_note = (
-            f" — Apollo returned fewer than the {query['max_companies']} requested. "
-            "Likely a plan-tier cap; refine filters or upgrade plan to see more."
-        )
-
     st.caption(
-        f"Showing {len(companies)} of {total:,} companies matching your "
-        f"filters{capped_note}."
+        f"Showing {len(orgs) + len(accounts)} of {total_matching:,} matches: "
+        f"**{len(orgs)} new leads**, **{len(accounts)} existing accounts**."
     )
 
-    for company in companies:
-        name = company.get("name") or "(unnamed)"
-        domain = company.get("primary_domain") or company.get("website_url") or ""
-        with st.expander(f"**{name}** — {domain}"):
-            _render_company_summary(company)
+    if orgs:
+        st.subheader("🆕 New leads")
+        for company in orgs:
+            with st.expander(_company_header(company, "organization")):
+                _render_company_summary(company)
+
+    if accounts:
+        st.subheader("📁 Existing accounts")
+        st.caption(
+            "Already in your Apollo workspace. Useful for verifying coverage "
+            "or revisiting dormant relationships."
+        )
+        for company in accounts:
+            with st.expander(_company_header(company, "account")):
+                _render_company_summary(company)
 
     with st.expander("Debug: raw Apollo search response"):
         st.json(result)
