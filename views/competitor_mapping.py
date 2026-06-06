@@ -322,23 +322,26 @@ def render() -> None:
         return
 
     # ── Recommendation ──────────────────────────────────────────────────────
+    # .get() so a query saved by an older build (without "offerings") still
+    # renders — it just falls through to the "add offerings" hint below.
+    offerings = q.get("offerings", "")
     st.subheader("⭐ Recommendation")
     if not anthropic_key:
         st.info(
             "Set `ANTHROPIC_API_KEY` to get a written recommendation of which "
             "keyword to target."
         )
-    elif not q["offerings"]:
+    elif not offerings:
         st.info(
-            "Add Sketch's core offerings in the form above to get a focused "
-            "recommendation."
+            "Add Sketch's core offerings in the form above (and re-run) to get a "
+            "focused recommendation."
         )
     else:
         with st.spinner("Asking Claude which keyword to target…"):
             try:
                 rec = _cached_recommendation(
                     json.dumps(candidates[:_RECOMMEND_TOP_N], sort_keys=True),
-                    q["offerings"],
+                    offerings,
                     q["seed"],
                     q["ours"],
                     anthropic_key,
