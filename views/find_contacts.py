@@ -215,7 +215,7 @@ def render() -> None:
     # Persist the user's per-page preference across searches so changing it
     # after a search sticks.
     if "_per_page" not in st.session_state:
-        st.session_state["_per_page"] = 25
+        st.session_state["_per_page"] = 10
 
     with st.form("find-contacts-form"):
         domain_input = st.text_input(
@@ -321,6 +321,41 @@ def render() -> None:
     # Surnames stay hidden until the user explicitly pays for them — Apollo's
     # /people/match costs 1 credit per row even without an email reveal.
     enriched = _enriched_store()
+
+    # Above-table nav row: per-page selector on the left, prev/next on the right.
+    # Buttons stay rendered (and disabled) on single-page results so the layout
+    # doesn't shift between searches.
+    nav_pp, _, nav_prev, nav_next = st.columns([2, 4, 1, 1])
+    nav_pp.selectbox(
+        "Results per page",
+        [10, 25, 50, 100],
+        key="_per_page",
+    )
+    if st.session_state["_per_page"] != query["per_page"]:
+        query["per_page"] = int(st.session_state["_per_page"])
+        query["page"] = 1
+        st.session_state["_find_contacts_query"] = query
+        st.rerun()
+
+    prev_clicked = nav_prev.button(
+        "← Prev",
+        disabled=query["page"] <= 1,
+        use_container_width=True,
+    )
+    next_clicked = nav_next.button(
+        "Next →",
+        disabled=query["page"] >= total_pages,
+        use_container_width=True,
+    )
+    if prev_clicked:
+        query["page"] -= 1
+        st.session_state["_find_contacts_query"] = query
+        st.rerun()
+    if next_clicked:
+        query["page"] += 1
+        st.session_state["_find_contacts_query"] = query
+        st.rerun()
+
     rows = [_person_row(p, enriched) for p in people]
     event = _render_results_table(rows)
 
@@ -375,43 +410,6 @@ def render() -> None:
         for err in errors:
             st.error(f"Name reveal failed — {err}")
         st.rerun()
-
-    # Results-per-page selector lives here (not in the form) so users can
-    # change it after they see the result count.
-    per_page_col, _ = st.columns([1, 3])
-    per_page_col.selectbox(
-        "Results per page",
-        [10, 25, 50, 100],
-        key="_per_page",
-    )
-    if st.session_state["_per_page"] != query["per_page"]:
-        query["per_page"] = int(st.session_state["_per_page"])
-        query["page"] = 1
-        st.session_state["_find_contacts_query"] = query
-        st.rerun()
-
-    # Pagination — sits below the reveal action so users can act on the
-    # current page before moving to the next.
-    if total_pages > 1:
-        nav_prev, nav_next = st.columns(2)
-        prev_clicked = nav_prev.button(
-            "← Previous page",
-            disabled=query["page"] <= 1,
-            use_container_width=True,
-        )
-        next_clicked = nav_next.button(
-            "Next page →",
-            disabled=query["page"] >= total_pages,
-            use_container_width=True,
-        )
-        if prev_clicked:
-            query["page"] -= 1
-            st.session_state["_find_contacts_query"] = query
-            st.rerun()
-        if next_clicked:
-            query["page"] += 1
-            st.session_state["_find_contacts_query"] = query
-            st.rerun()
 
     with st.expander("Debug: raw Apollo response"):
         st.json(result)
