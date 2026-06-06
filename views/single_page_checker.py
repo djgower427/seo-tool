@@ -49,7 +49,7 @@ def stream_review(client: Anthropic, prompt: str):
     """Yield text chunks from a streamed Claude response."""
     with client.messages.stream(
         model=MODEL,
-        max_tokens=4096,
+        max_tokens=8192,
         messages=[{"role": "user", "content": prompt}],
     ) as stream:
         for text in stream.text_stream:

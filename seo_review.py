@@ -178,16 +178,21 @@ You are an experienced SEO consultant and copy editor reviewing a single web pag
 Using ONLY the data provided below (do not invent details about the page that aren't shown), produce a readable terminal report with these sections, in this order:
 
 1. **Summary** — 2-3 sentences on the page's overall health.
-2. **Broken Links** — list each broken/errored link with its status and a brief note. If none, say so.
-3. **Grammar & Spelling** — specific issues you spot in the body text, with the offending phrase quoted.
-4. **Copywriting Suggestions** — evaluate the page against these established copywriting frameworks and give concrete improvements:
+2. **ICP & Positioning** — reverse-engineer the audience from the on-page copy:
+   - **Targeted ICP**: who is this page written for? Be specific about role/title, company size, industry, and any narrower segmentation cues. If the page targets multiple ICPs, name the primary one and flag any secondary.
+   - **Pain points addressed**: list the 2–4 specific pains, frustrations, or jobs-to-be-done this page speaks to. Quote the lines that make each pain explicit (or note when a pain is only hinted at).
+   - **Promised metric improvement**: in 1–2 sentences, describe how this page makes that ICP believe they can improve their key metrics — name the metrics implied (revenue, churn, productivity, time-to-X, conversion rate, etc.) and the mechanism the page suggests will move them.
+   If the page is too thin or too generic to identify a clear ICP, say so plainly and recommend the 2–3 most likely ICPs the copy could be reshaped around.
+3. **Broken Links** — list each broken/errored link with its status and a brief note. If none, say so.
+4. **Grammar & Spelling** — specific issues you spot in the body text, with the offending phrase quoted.
+5. **Copywriting Suggestions** — evaluate the page against these established copywriting frameworks and give concrete improvements:
    - **PAS (Problem–Agitate–Solution)**: Does the page name a problem the reader has, agitate the pain of it, and present the offering as the solution? Quote what's working and what's missing.
    - **AIDA (Attention–Interest–Desire–Action)**: Does the headline/hero grab attention, the next section build interest, the body create desire, and a clear CTA drive action? Identify which stage is weakest.
    - **BAB (Before–After–Bridge)**: Does the copy paint the reader's "before" state, the "after" state they want, and bridge with the offering? Suggest specific rewrites if absent.
    - **StoryBrand (SB7)**: Does the page cast the reader as the hero with a clear problem, position the brand as the guide with a plan, call them to action, and contrast success vs. failure? Flag any of the 7 elements that are missing or muddled.
    For each framework, give a 1-line verdict (e.g. "PAS: weak — problem is implied but never named") plus 1–2 concrete rewrites or additions. End the section with a short "Recommended primary framework" pick based on the page's intent and what's already on the page.
-5. **On-Page SEO** — title tag, meta description, headings hierarchy, image alt text, internal linking, content depth. Be specific and actionable.
-6. **Priority Fixes** — a numbered list of the top 3-5 things to address first.
+6. **On-Page SEO** — title tag, meta description, headings hierarchy, image alt text, internal linking, content depth. Be specific and actionable.
+7. **Priority Fixes** — a numbered list of the top 3-5 things to address first.
 
 Use plain text with light Markdown (headings, bullets). Keep it scannable. Don't pad — every bullet should be actionable or specific.
 """
@@ -233,7 +238,7 @@ def main() -> int:
     prompt = build_prompt(page, link_results)
     resp = client.messages.create(
         model=MODEL,
-        max_tokens=4096,
+        max_tokens=8192,
         messages=[{"role": "user", "content": prompt}],
     )
     report = "".join(block.text for block in resp.content if getattr(block, "type", "") == "text")
