@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from urllib.parse import urlparse
 
 import pandas as pd
 import streamlit as st
 
+from seo_apollo import ApolloError, organization_enrich
 from seo_semrush import (
     SemrushError,
     domain_overview,
@@ -22,6 +24,13 @@ DATABASES = ["us", "uk", "ca", "au", "de", "fr", "es", "it", "br", "in"]
 def get_semrush_key() -> str | None:
     try:
         return st.secrets.get("SEMRUSH_API_KEY")
+    except (FileNotFoundError, KeyError, AttributeError):
+        return None
+
+
+def get_apollo_key() -> str | None:
+    try:
+        return st.secrets.get("APOLLO_API_KEY")
     except (FileNotFoundError, KeyError, AttributeError):
         return None
 
@@ -68,6 +77,14 @@ def _cached_history(
 ) -> list[dict[str, str]]:
     del version
     return domain_rank_history(domain, database, api_key, limit=limit)
+
+
+@st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=False)
+def _cached_apollo_org(
+    domain: str, api_key: str, version: int
+) -> dict | None:
+    del version
+    return organization_enrich(domain, api_key)
 
 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
@@ -133,6 +150,92 @@ def render_history(rows: list[dict[str, str]]) -> None:
         st.line_chart(df.set_index("Date")["Traffic value"], height=320)
 
 
+def _fmt_int(v: Any) -> str:
+    try:
+        return f"{int(v):,}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _fmt_money(v: Any) -> str:
+    """Apollo returns funding amounts as raw numbers (USD)."""
+    try:
+        n = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    if n >= 1_000_000_000:
+        return f"${n / 1_000_000_000:.1f}B"
+    if n >= 1_000_000:
+        return f"${n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"${n / 1_000:.0f}K"
+    return f"${n:,.0f}"
+
+
+def render_apollo(org: dict) -> None:
+    """Render the four enrichment sections (size/industry, funding, tech, social).
+
+    Field names follow Apollo's documented response shape. Anything missing
+    renders as '—' — Apollo's coverage varies a lot by company size and region.
+    """
+    # Company & size
+    st.markdown("**Company**")
+    cols = st.columns(4)
+    cols[0].metric("Employees", _fmt_int(org.get("estimated_num_employees")))
+    cols[1].metric("Industry", (org.get("industry") or "—").title() if org.get("industry") else "—")
+    location_parts = [
+        org.get("city"),
+        org.get("state"),
+        org.get("country"),
+    ]
+    location = ", ".join(p for p in location_parts if p) or "—"
+    cols[2].metric("HQ", location)
+    revenue = org.get("annual_revenue_printed") or _fmt_money(org.get("annual_revenue"))
+    cols[3].metric("Est. revenue", revenue)
+
+    # Funding
+    st.markdown("**Funding**")
+    cols = st.columns(3)
+    total_raised = org.get("total_funding_printed") or _fmt_money(org.get("total_funding"))
+    cols[0].metric("Total raised", total_raised)
+    cols[1].metric("Latest stage", org.get("latest_funding_stage") or "—")
+    cols[2].metric("Latest round", org.get("latest_funding_round_date") or "—")
+
+    # Tech stack
+    st.markdown("**Tech stack**")
+    techs = org.get("technology_names") or org.get("current_technologies") or []
+    # current_technologies is a list of dicts {name, category, uid}; normalize.
+    tech_names = []
+    for t in techs:
+        if isinstance(t, str):
+            tech_names.append(t)
+        elif isinstance(t, dict) and t.get("name"):
+            tech_names.append(t["name"])
+    if tech_names:
+        st.caption(f"{len(tech_names)} technologies detected by Apollo")
+        # Render as a wrap-friendly pill list.
+        st.markdown(" ".join(f"`{name}`" for name in tech_names))
+    else:
+        st.caption("No tech stack data returned for this company.")
+
+    # Social & contact
+    st.markdown("**Links & contact**")
+    links = []
+    for label, key in [
+        ("Website", "website_url"),
+        ("LinkedIn", "linkedin_url"),
+        ("Twitter", "twitter_url"),
+        ("Facebook", "facebook_url"),
+    ]:
+        url = org.get(key)
+        if url:
+            links.append(f"[{label}]({url})")
+    phone = (org.get("primary_phone") or {}).get("number") if isinstance(org.get("primary_phone"), dict) else org.get("phone")
+    if phone:
+        links.append(f"☎ {phone}")
+    st.markdown(" · ".join(links) if links else "—")
+
+
 def render_top_pages(rows: list[dict]) -> None:
     if not rows:
         st.info("No top pages returned for this domain.")
@@ -170,7 +273,7 @@ def render_top_pages(rows: list[dict]) -> None:
 
 def render() -> None:
     st.title("🌐 Full Site Status")
-    st.caption("Domain-wide SEO snapshot via Semrush. GA4, GSC, and extra Semrush reports coming next.")
+    st.caption("Domain-wide SEO snapshot via Semrush, with optional Apollo company enrichment.")
 
     api_key = get_semrush_key()
     if not api_key:
@@ -199,11 +302,22 @@ def render() -> None:
                 "in the first 100–150 keywords."
             ),
         )
+        apollo_key = get_apollo_key()
+        enrich_with_apollo = st.checkbox(
+            "Enrich with Apollo (1 credit per company; size, industry, funding, tech stack)",
+            value=False,
+            disabled=not apollo_key,
+            help=(
+                None
+                if apollo_key
+                else "Set APOLLO_API_KEY in .streamlit/secrets.toml to enable."
+            ),
+        )
         force_refresh = st.checkbox(
             "Force refresh (bypass 6-hour cache; costs Semrush credits)"
         )
         debug_mode = st.checkbox(
-            "Debug: also show raw Semrush responses (uncached; extra credits)"
+            "Debug: also show raw Semrush + Apollo responses (uncached; extra credits)"
         )
         submitted = st.form_submit_button("Run check", type="primary")
 
@@ -248,6 +362,21 @@ def render() -> None:
     if pages is not None:
         st.subheader(f"Top {len(pages)} pages by organic traffic share")
         render_top_pages(pages)
+
+    apollo_org: dict | None = None
+    apollo_ok = False
+    if enrich_with_apollo and apollo_key:
+        st.subheader(f"Apollo enrichment — {domain}")
+        with st.spinner("Querying Apollo…"):
+            try:
+                apollo_org = _cached_apollo_org(domain, apollo_key, _API_CACHE_VERSION)
+                apollo_ok = True
+            except ApolloError as e:
+                st.error(f"Apollo — {e}")
+        if apollo_org:
+            render_apollo(apollo_org)
+        elif apollo_ok:
+            st.info(f"Apollo has no record for `{domain}`.")
 
     if debug_mode:
         st.divider()
@@ -297,6 +426,16 @@ def render() -> None:
                     st.info("(empty response body)")
                 else:
                     st.code(body, language="text")
+
+        if enrich_with_apollo and apollo_key:
+            st.subheader("Debug: raw Apollo response")
+            with st.expander("organizations/enrich"):
+                if apollo_org is not None:
+                    st.json(apollo_org)
+                elif apollo_ok:
+                    st.info("(Apollo returned no organization for this domain)")
+                else:
+                    st.info("(Apollo call failed — see error above)")
 
 
 render()
