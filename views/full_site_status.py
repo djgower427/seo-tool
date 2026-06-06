@@ -14,7 +14,6 @@ from seo_semrush import (
     SemrushError,
     domain_overview,
     domain_rank_history,
-    raw_request,
     top_pages,
 )
 
@@ -291,19 +290,10 @@ def render() -> None:
                 else "Set APOLLO_API_KEY in .streamlit/secrets.toml to enable."
             ),
         )
-        force_refresh = st.checkbox(
-            "Force refresh (bypass 6-hour cache; costs Semrush credits)"
-        )
-        debug_mode = st.checkbox(
-            "Debug: also show raw Semrush + Apollo responses (uncached; extra credits)"
-        )
         submitted = st.form_submit_button("Run check", type="primary")
 
     if not submitted or not domain_input.strip():
         return
-
-    if force_refresh:
-        st.cache_data.clear()
 
     domain = normalize_domain(domain_input)
 
@@ -355,65 +345,6 @@ def render() -> None:
             render_apollo(apollo_org)
         elif apollo_ok:
             st.info(f"Apollo has no record for `{domain}`.")
-
-    if debug_mode:
-        st.divider()
-        st.subheader("Debug: raw Semrush responses")
-        for label, params in [
-            (
-                "domain_ranks",
-                {
-                    "type": "domain_ranks",
-                    "key": api_key,
-                    "domain": domain,
-                    "database": database,
-                    "export_columns": "Dn,Rk,Or,Ot,Oc,Ad,At,Ac",
-                },
-            ),
-            (
-                "domain_rank_history",
-                {
-                    "type": "domain_rank_history",
-                    "key": api_key,
-                    "domain": domain,
-                    "database": database,
-                    "export_columns": "Rk,Or,Ot,Oc,Dt",
-                    "display_limit": str(int(history_months)),
-                },
-            ),
-            (
-                "domain_organic (first 10)",
-                {
-                    "type": "domain_organic",
-                    "key": api_key,
-                    "domain": domain,
-                    "database": database,
-                    "export_columns": "Ph,Po,Nq,Ur,Tr",
-                    "display_limit": "10",
-                    "display_sort": "tr_desc",
-                },
-            ),
-        ]:
-            with st.expander(label):
-                try:
-                    body = raw_request(params)
-                except SemrushError as e:
-                    st.error(str(e))
-                    continue
-                if not body.strip():
-                    st.info("(empty response body)")
-                else:
-                    st.code(body, language="text")
-
-        if enrich_with_apollo and apollo_key:
-            st.subheader("Debug: raw Apollo response")
-            with st.expander("organizations/enrich"):
-                if apollo_org is not None:
-                    st.json(apollo_org)
-                elif apollo_ok:
-                    st.info("(Apollo returned no organization for this domain)")
-                else:
-                    st.info("(Apollo call failed — see error above)")
 
 
 render()
