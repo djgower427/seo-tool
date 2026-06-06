@@ -106,6 +106,40 @@ def _request(params: dict[str, str]) -> list[dict[str, str]]:
     return [dict(zip(header, line.split(";"))) for line in lines[1:]]
 
 
+def domain_organic_keywords(
+    domain: str,
+    database: str,
+    api_key: str,
+    *,
+    limit: int = 100,
+    sort: str = "tr_desc",
+) -> list[dict[str, str]]:
+    """Organic keywords a domain ranks for, with position, volume, and difficulty.
+
+    Pulls the `domain_organic` report. Each row carries:
+      Ph (keyword), Po (position), Nq (search volume), Kd (keyword difficulty,
+      0-100), Cp (CPC), Co (competition), Tr (traffic share %), Ur (ranking URL).
+
+    Costs 10 Semrush credits per returned row (same as the keyword pool used by
+    Full Site Status). `sort` is a Semrush display_sort code — default `tr_desc`
+    (most traffic first); pass `nq_desc` to bias toward high-volume keywords.
+
+    Returns [] for a domain with no organic keywords in this database. Raises
+    SemrushError on an API-level error (out of credits, bad column, etc.).
+    """
+    return _request(
+        {
+            "type": "domain_organic",
+            "key": api_key,
+            "domain": domain,
+            "database": database,
+            "export_columns": "Ph,Po,Nq,Kd,Cp,Co,Tr,Ur",
+            "display_limit": str(limit),
+            "display_sort": sort,
+        }
+    )
+
+
 def domain_overview(domain: str, database: str, api_key: str) -> dict[str, str] | None:
     """Single-row snapshot: rank, organic keywords, organic traffic, ad stats."""
     rows = _request(

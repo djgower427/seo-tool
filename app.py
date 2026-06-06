@@ -30,6 +30,11 @@ nav = st.navigation(
             title="Target Finder",
             icon="🎯",
         ),
+        st.Page(
+            "views/competitor_mapping.py",
+            title="Competitor / Market Mapping",
+            icon="🗺️",
+        ),
     ]
 )
 nav.run()
