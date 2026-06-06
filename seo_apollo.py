@@ -137,6 +137,49 @@ def people_search(
     )
 
 
+def organization_search(
+    api_key: str,
+    *,
+    keywords: str | None = None,
+    employees_min: int | None = None,
+    employees_max: int | None = None,
+    locations: list[str] | None = None,
+    page: int = 1,
+    per_page: int = 25,
+) -> dict[str, Any]:
+    """Search Apollo's company database. CONSUMES CREDITS per call (typically 1).
+
+    Apollo's standard pagination knobs apply: up to 100 per_page, up to 500
+    pages, 50K records hard cap. Returns the raw response with both
+    `organizations` and `pagination` so the caller can paginate.
+
+    `keywords` is a free-text query Apollo fuzzy-matches across company name,
+    description, industry, and detected technologies — handy for filters like
+    "SaaS HubSpot" without needing technology UIDs. `employees_min`/`_max`
+    map to organization_num_employees_ranges[] in the shape Apollo expects.
+    `locations` is a list of HQ location strings (countries, states, cities).
+    """
+    body: dict[str, Any] = {
+        "page": page,
+        "per_page": per_page,
+    }
+    if keywords:
+        body["q_keywords"] = keywords
+    if employees_min is not None or employees_max is not None:
+        lo = employees_min if employees_min is not None else 1
+        hi = employees_max if employees_max is not None else 100000
+        body["organization_num_employees_ranges"] = [f"{lo},{hi}"]
+    if locations:
+        body["organization_locations"] = locations
+
+    return _request(
+        "POST",
+        "/mixed_companies/search",
+        api_key,
+        json=body,
+    )
+
+
 def person_match(
     person_id: str,
     api_key: str,

@@ -25,6 +25,11 @@ nav = st.navigation(
             title="Find Contacts",
             icon="👥",
         ),
+        st.Page(
+            "views/target_finder.py",
+            title="Target Finder",
+            icon="🎯",
+        ),
     ]
 )
 nav.run()
