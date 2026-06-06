@@ -189,9 +189,7 @@ def render() -> None:
             default=[],
             help="Apollo's defined seniority buckets. Leave empty for all.",
         )
-        c1, c2 = st.columns(2)
-        per_page = c1.number_input("Results per page", 10, 100, 25, step=5)
-        page = c2.number_input("Page", 1, 500, 1)
+        per_page = st.selectbox("Results per page", [10, 25, 50, 100], index=1)
         submitted = st.form_submit_button("Search (free)", type="primary")
 
     # On submit: expand the function to titles via Claude (if non-empty),
@@ -226,7 +224,7 @@ def render() -> None:
             "function": function,
             "titles": titles,
             "seniorities": seniorities,
-            "page": int(page),
+            "page": 1,
             "per_page": int(per_page),
         }
 
@@ -302,6 +300,29 @@ def render() -> None:
         for err in errors:
             st.error(f"Reveal failed — {err}")
         st.rerun()  # re-render table with revealed emails merged in
+
+    # Pagination — sits below the reveal action so users can act on the
+    # current page before moving to the next.
+    if total_pages > 1:
+        nav_prev, nav_next = st.columns(2)
+        prev_clicked = nav_prev.button(
+            "← Previous page",
+            disabled=query["page"] <= 1,
+            use_container_width=True,
+        )
+        next_clicked = nav_next.button(
+            "Next page →",
+            disabled=query["page"] >= total_pages,
+            use_container_width=True,
+        )
+        if prev_clicked:
+            query["page"] -= 1
+            st.session_state["_find_contacts_query"] = query
+            st.rerun()
+        if next_clicked:
+            query["page"] += 1
+            st.session_state["_find_contacts_query"] = query
+            st.rerun()
 
     with st.expander("Debug: raw Apollo response"):
         st.json(result)
