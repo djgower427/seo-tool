@@ -23,7 +23,13 @@ from seo_claude import ClaudeError, expand_job_function
 from seo_keys import get_anthropic_key, get_apollo_key, normalize_domain
 
 # Bump if the cached query / search return shape changes.
-_SEARCH_CACHE_VERSION = 3
+_SEARCH_CACHE_VERSION = 5
+
+# Apollo's docs say 100 is the per_page max for api_search, but we haven't
+# empirically tested higher values. Setting to 500 as a probe — if Apollo
+# silently caps, we'll see len(people) <= 100 in the debug expander and
+# revert. If it returns more, we keep this.
+_APOLLO_FETCH_MAX = 500
 
 # Single per-session cache of best-known person data: search preview → basic
 # enrichment (full names) → email reveal. Each step merges over the prior one,
@@ -48,21 +54,19 @@ def _cached_people_search(
     domain: str,
     titles_key: tuple[str, ...],
     seniorities_key: tuple[str, ...],
-    page: int,
-    per_page: int,
     api_key: str,
     version: int,
 ) -> dict[str, Any]:
-    """Search is free, so cache aggressively. Tuples in the signature because
-    Streamlit's cache key needs hashable args."""
+    """Always fetch Apollo's max (100). The view paginates client-side. Tuples
+    in the signature because Streamlit's cache key needs hashable args."""
     del version
     return people_search(
         domain,
         api_key,
         titles=list(titles_key) or None,
         seniorities=list(seniorities_key) or None,
-        page=page,
-        per_page=per_page,
+        page=1,
+        per_page=_APOLLO_FETCH_MAX,
     )
 
 
@@ -285,8 +289,6 @@ def render() -> None:
                 query["domain"],
                 tuple(query["titles"]),
                 tuple(query["seniorities"]),
-                query["page"],
-                query["per_page"],
                 api_key,
                 _SEARCH_CACHE_VERSION,
             )
@@ -304,18 +306,29 @@ def render() -> None:
         with st.expander(label):
             st.markdown(" · ".join(f"`{t}`" for t in query["titles"]))
 
-    people = result.get("people") or []
-    pagination = result.get("pagination") or {}
+    all_people = result.get("people") or []
 
-    if not people:
+    if not all_people:
         st.info(f"No contacts found at `{query['domain']}` for those filters.")
         return
 
-    total = pagination.get("total_entries", len(people))
-    total_pages = pagination.get("total_pages", 1)
+    # Client-side pagination over the cached result list.
+    total = len(all_people)
+    per_page = max(1, int(query["per_page"]))
+    total_pages = max(1, -(-total // per_page))  # ceil div
+    current_page = min(max(1, int(query["page"])), total_pages)
+    start = (current_page - 1) * per_page
+    end = start + per_page
+    people = all_people[start:end]
+
+    cap_note = (
+        " — Apollo caps the free search at 100; refine filters to narrow further"
+        if total >= _APOLLO_FETCH_MAX
+        else ""
+    )
     st.caption(
-        f"Showing {len(people)} of {total:,} contacts at `{query['domain']}` "
-        f"(page {query['page']} of {total_pages})."
+        f"Showing {start + 1}–{start + len(people)} of {total:,} contacts at "
+        f"`{query['domain']}` (page {current_page} of {total_pages}){cap_note}."
     )
 
     # Surnames stay hidden until the user explicitly pays for them — Apollo's
@@ -339,20 +352,20 @@ def render() -> None:
 
     prev_clicked = nav_prev.button(
         "← Prev",
-        disabled=query["page"] <= 1,
+        disabled=current_page <= 1,
         use_container_width=True,
     )
     next_clicked = nav_next.button(
         "Next →",
-        disabled=query["page"] >= total_pages,
+        disabled=current_page >= total_pages,
         use_container_width=True,
     )
     if prev_clicked:
-        query["page"] -= 1
+        query["page"] = current_page - 1
         st.session_state["_find_contacts_query"] = query
         st.rerun()
     if next_clicked:
-        query["page"] += 1
+        query["page"] = current_page + 1
         st.session_state["_find_contacts_query"] = query
         st.rerun()
 
