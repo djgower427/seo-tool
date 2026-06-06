@@ -5,9 +5,9 @@ Run with: `streamlit run app.py`
 
 import streamlit as st
 
-st.set_page_config(page_title="SEO Review", page_icon="🔎", layout="wide")
-
 SITE_TITLE = "Dan's mid marketing app"
+
+st.set_page_config(page_title=SITE_TITLE, page_icon="🔎", layout="wide")
 
 # Site header in the sidebar (above the nav) and as an H1 atop every page.
 # Rendered here, before nav.run(), so it appears once across all pages.
