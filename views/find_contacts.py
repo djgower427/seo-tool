@@ -25,11 +25,9 @@ from seo_keys import get_anthropic_key, get_apollo_key, normalize_domain
 # Bump if the cached query / search return shape changes.
 _SEARCH_CACHE_VERSION = 5
 
-# Apollo's docs say 100 is the per_page max for api_search, but we haven't
-# empirically tested higher values. Setting to 500 as a probe — if Apollo
-# silently caps, we'll see len(people) <= 100 in the debug expander and
-# revert. If it returns more, we keep this.
-_APOLLO_FETCH_MAX = 500
+# 100 is Apollo's hard cap for /mixed_people/api_search per_page — anything
+# higher 422s with "Per page not supported". Confirmed empirically.
+_APOLLO_FETCH_MAX = 100
 
 # Single per-session cache of best-known person data: search preview → basic
 # enrichment (full names) → email reveal. Each step merges over the prior one,
