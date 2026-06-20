@@ -29,6 +29,7 @@ from seo_hubspot import (
     campaign_metrics,
     list_campaigns,
     search_objects,
+    traffic_sources,
 )
 from seo_keys import normalize_domain
 from seo_semrush import (
@@ -49,8 +50,11 @@ _SYSTEM = (
     "company search by criteria. Use for prospecting / market questions about "
     "companies we may not work with.\n"
     "- HubSpot tools: OUR OWN CRM and marketing — our contacts, companies, and "
-    "deals, plus marketing campaign analytics. Use when the question is about "
-    "'our' records, pipeline/deals, customers, or campaigns.\n"
+    "deals, marketing campaign analytics, and our WEBSITE TRAFFIC by source "
+    "(organic, paid, direct, etc.) for any date range. Use when the question is "
+    "about 'our' records, pipeline/deals, customers, campaigns, or our site's "
+    "traffic. For year-over-year or YTD traffic, call the traffic tool twice "
+    "(this period and the matching period last year) and compare.\n"
     "- Semrush tools: SEO data — organic traffic/keywords, keyword difficulty, "
     "and top pages for a domain.\n\n"
     "Pick the right source: 'our deals/pipeline/customers/campaigns' → HubSpot; "
@@ -282,6 +286,36 @@ def _hubspot_deals_report(args: dict[str, Any], *, hubspot_token: str) -> Any:
         "deals fetched, not all of them."
     )
     return result
+
+
+def _hubspot_traffic(args: dict[str, Any], *, hubspot_token: str) -> Any:
+    start = datetime.strptime(args["start_date"], "%Y-%m-%d").strftime("%Y%m%d")
+    end = datetime.strptime(args["end_date"], "%Y-%m-%d").strftime("%Y%m%d")
+    payload = traffic_sources(hubspot_token, start=start, end=end)
+
+    sources = []
+    organic_visits = 0
+    for b in payload.get("breakdowns") or []:
+        name = b.get("breakdown")
+        visits = b.get("visits")
+        sources.append(
+            {"source": name, "visits": visits, "contacts": b.get("contacts")}
+        )
+        if name and "organic" in str(name).lower():
+            try:
+                organic_visits += int(visits or 0)
+            except (TypeError, ValueError):
+                pass
+
+    totals = payload.get("totals") or {}
+    return {
+        "start_date": args["start_date"],
+        "end_date": args["end_date"],
+        "organic_visits": organic_visits,
+        "total_visits": totals.get("visits"),
+        "sources": sources,
+        "note": "'visits' is HubSpot's term for sessions.",
+    }
 
 
 def _hubspot_list_campaigns(args: dict[str, Any], *, hubspot_token: str) -> Any:
@@ -529,6 +563,24 @@ def _build_toolbox(
                 },
             },
             {
+                "name": "hubspot_website_traffic",
+                "description": (
+                    "Our website's traffic (sessions, called 'visits') broken "
+                    "down by source — organic, paid, direct, referral, social, "
+                    "email — for a date range. Use for questions about our site's "
+                    "organic/overall traffic. For YTD-vs-last-year, call this "
+                    "twice with the two date ranges and compare the results."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "start_date": {"type": "string", "description": "YYYY-MM-DD (inclusive)."},
+                        "end_date": {"type": "string", "description": "YYYY-MM-DD (inclusive)."},
+                    },
+                    "required": ["start_date", "end_date"],
+                },
+            },
+            {
                 "name": "hubspot_list_campaigns",
                 "description": (
                     "List our HubSpot marketing campaigns (id + name), "
@@ -571,6 +623,7 @@ def _build_toolbox(
                 "hubspot_search_companies": lambda a: _hubspot_search("companies", a, hubspot_token=hubspot_token),
                 "hubspot_search_deals": lambda a: _hubspot_search("deals", a, hubspot_token=hubspot_token),
                 "hubspot_deals_report": lambda a: _hubspot_deals_report(a, hubspot_token=hubspot_token),
+                "hubspot_website_traffic": lambda a: _hubspot_traffic(a, hubspot_token=hubspot_token),
                 "hubspot_list_campaigns": lambda a: _hubspot_list_campaigns(a, hubspot_token=hubspot_token),
                 "hubspot_campaign_metrics": lambda a: _hubspot_campaign_metrics(a, hubspot_token=hubspot_token),
             }
@@ -596,6 +649,10 @@ def answer_question(
     client = anthropic.Anthropic(api_key=anthropic_key)
     tools, handlers = _build_toolbox(apollo_key, semrush_key, hubspot_token)
 
+    # Give the model today's date so it can resolve relative ranges (YTD, last
+    # year, last 30 days) itself.
+    system = f"{_SYSTEM}\n\nToday's date is {datetime.now().date().isoformat()}."
+
     messages: list[dict[str, Any]] = [{"role": "user", "content": question}]
     tools_used: list[dict[str, Any]] = []
 
@@ -604,7 +661,7 @@ def answer_question(
             response = client.messages.create(
                 model=_AGENT_MODEL,
                 max_tokens=2048,
-                system=_SYSTEM,
+                system=system,
                 tools=tools,
                 messages=messages,
             )

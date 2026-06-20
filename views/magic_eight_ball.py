@@ -45,8 +45,9 @@ def render() -> None:
         st.caption(
             "I can pull from: " + ", ".join(sources) + ". Ask about a company's "
             "size/revenue/tech, its SEO traffic and keywords, our CRM "
-            "contacts/companies/deals, marketing campaign metrics, or companies "
-            "matching criteria. Answering may consume Apollo/Semrush credits."
+            "contacts/companies/deals, our website traffic by source, marketing "
+            "campaign metrics, or companies matching criteria. Answering may "
+            "consume Apollo/Semrush credits."
         )
     else:
         st.warning(

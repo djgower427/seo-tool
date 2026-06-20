@@ -247,6 +247,22 @@ def list_campaigns(
     return out
 
 
+def traffic_sources(token: str, *, start: str, end: str) -> dict[str, Any]:
+    """Website traffic broken down by source (organic, paid, direct, …) for a
+    date range. `start`/`end` are YYYYMMDD strings (HubSpot's required format).
+
+    Returns the raw payload, whose `breakdowns` list has one entry per source
+    with a `visits` field (HubSpot's term for sessions) and `contacts`. Requires
+    the private app to have an analytics / business-intelligence read scope.
+    """
+    return _request(
+        "GET",
+        "/analytics/v2/reports/sources/total",
+        token,
+        params={"start": start, "end": end},
+    )
+
+
 def campaign_metrics(
     token: str,
     campaign_guid: str,
