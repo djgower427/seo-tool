@@ -87,7 +87,9 @@ def render() -> None:
         return
 
     st.markdown(f"**Q:** {result['question']}")
-    st.markdown(f"### 🎱 {result['answer']}")
+    st.markdown("#### 🎱 Answer")
+    with st.container(border=True):
+        st.markdown(result["answer"])
 
     tools_used = result.get("tools_used") or []
     if tools_used:
