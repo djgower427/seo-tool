@@ -30,6 +30,11 @@ def get_anthropic_key() -> str | None:
     return _secret("ANTHROPIC_API_KEY")
 
 
+def get_hubspot_token() -> str | None:
+    """HubSpot Private App access token (used as a Bearer token)."""
+    return _secret("HUBSPOT_ACCESS_TOKEN")
+
+
 def normalize_domain(raw: str) -> str:
     """Accept either a bare domain or a URL; return the bare host."""
     raw = raw.strip().lower()

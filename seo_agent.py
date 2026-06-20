@@ -23,6 +23,11 @@ from seo_apollo import (
     people_search,
 )
 from seo_claude import ClaudeError
+from seo_hubspot import (
+    campaign_metrics,
+    list_campaigns,
+    search_objects,
+)
 from seo_keys import normalize_domain
 from seo_semrush import (
     domain_organic_keywords,
@@ -37,13 +42,20 @@ _MAX_ROWS = 25  # cap list results so tool output stays compact
 _SYSTEM = (
     "You are the Magic Eight Ball inside an internal marketing app. Answer the "
     "user's question by retrieving REAL data with the available tools:\n"
-    "- Apollo tools: company firmographics (size, revenue, industry, tech), "
-    "contacts/people at a company, and company search by criteria.\n"
+    "- Apollo tools: an EXTERNAL prospecting database — company firmographics "
+    "(size, revenue, industry, tech), contacts/people at any company, and "
+    "company search by criteria. Use for prospecting / market questions about "
+    "companies we may not work with.\n"
+    "- HubSpot tools: OUR OWN CRM and marketing — our contacts, companies, and "
+    "deals, plus marketing campaign analytics. Use when the question is about "
+    "'our' records, pipeline/deals, customers, or campaigns.\n"
     "- Semrush tools: SEO data — organic traffic/keywords, keyword difficulty, "
     "and top pages for a domain.\n\n"
-    "Decide which tool(s) the question needs, call them, and base your answer "
-    "ONLY on what they return — never invent numbers or facts. Keep the final "
-    "answer brief: 2-4 plain sentences, leading with the direct answer. If the "
+    "Pick the right source: 'our deals/pipeline/customers/campaigns' → HubSpot; "
+    "'find/look up a company or its people in the market' → Apollo; 'SEO / "
+    "traffic / keywords' → Semrush. Call the tool(s), and base your answer ONLY "
+    "on what they return — never invent numbers or facts. Keep the final answer "
+    "brief: 2-4 plain sentences, leading with the direct answer. If the "
     "available tools can't answer the question, say so in one sentence and name "
     "the kind of data source that would be needed."
 )
@@ -205,6 +217,36 @@ def _semrush_top_pages(args: dict[str, Any], *, semrush_key: str) -> Any:
     }
 
 
+def _hubspot_search(
+    object_type: str, args: dict[str, Any], *, hubspot_token: str
+) -> Any:
+    results = search_objects(
+        object_type,
+        args.get("query", ""),
+        hubspot_token,
+        limit=min(int(args.get("limit", _MAX_ROWS)), _MAX_ROWS),
+    )
+    return {"object": object_type, "count": len(results), "results": results}
+
+
+def _hubspot_list_campaigns(args: dict[str, Any], *, hubspot_token: str) -> Any:
+    campaigns = list_campaigns(
+        hubspot_token,
+        name_contains=args.get("name_contains"),
+        limit=min(int(args.get("limit", _MAX_ROWS)), _MAX_ROWS),
+    )
+    return {"count": len(campaigns), "campaigns": campaigns}
+
+
+def _hubspot_campaign_metrics(args: dict[str, Any], *, hubspot_token: str) -> Any:
+    return campaign_metrics(
+        hubspot_token,
+        args["campaign_id"],
+        start_date=args.get("start_date"),
+        end_date=args.get("end_date"),
+    )
+
+
 # ── Toolbox assembly ─────────────────────────────────────────────────────────
 
 _DOMAIN_PROP = {"type": "string", "description": "Company domain, e.g. stripe.com"}
@@ -215,7 +257,9 @@ _DB_PROP = {
 
 
 def _build_toolbox(
-    apollo_key: str | None, semrush_key: str | None
+    apollo_key: str | None,
+    semrush_key: str | None,
+    hubspot_token: str | None,
 ) -> tuple[list[dict[str, Any]], dict[str, Callable[[dict[str, Any]], Any]]]:
     """Return (tool schemas, name->handler) for the data sources whose keys are
     set, so Claude is only offered tools it can actually run."""
@@ -353,6 +397,93 @@ def _build_toolbox(
             }
         )
 
+    if hubspot_token:
+        _hs_query = {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Free-text search (name, email, domain, etc.).",
+                },
+                "limit": {"type": "integer", "description": "Max records (<=25)."},
+            },
+            "required": ["query"],
+        }
+        tools += [
+            {
+                "name": "hubspot_search_contacts",
+                "description": (
+                    "Search OUR HubSpot CRM contacts (name, email, title, "
+                    "company, lifecycle stage). Use for questions about our "
+                    "contacts/leads/customers."
+                ),
+                "input_schema": _hs_query,
+            },
+            {
+                "name": "hubspot_search_companies",
+                "description": (
+                    "Search OUR HubSpot CRM companies (name, domain, industry, "
+                    "size, revenue, lifecycle stage). Use for questions about "
+                    "companies in our CRM."
+                ),
+                "input_schema": _hs_query,
+            },
+            {
+                "name": "hubspot_search_deals",
+                "description": (
+                    "Search OUR HubSpot CRM deals (name, amount, stage, "
+                    "pipeline, close date). Use for pipeline / deal / revenue "
+                    "questions about our business."
+                ),
+                "input_schema": _hs_query,
+            },
+            {
+                "name": "hubspot_list_campaigns",
+                "description": (
+                    "List our HubSpot marketing campaigns (id + name), "
+                    "optionally filtered by a name substring. Use this first to "
+                    "find a campaign's id before fetching its metrics."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "name_contains": {
+                            "type": "string",
+                            "description": "Only return campaigns whose name contains this text.",
+                        },
+                        "limit": {"type": "integer", "description": "Max campaigns (<=25)."},
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "name": "hubspot_campaign_metrics",
+                "description": (
+                    "Attribution metrics for one campaign (sessions, new & "
+                    "influenced contacts, etc.) over a date range. Get the "
+                    "campaign_id from hubspot_list_campaigns first."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "campaign_id": {"type": "string", "description": "Campaign id (GUID)."},
+                        "start_date": {"type": "string", "description": "YYYY-MM-DD. Defaults to 90 days ago."},
+                        "end_date": {"type": "string", "description": "YYYY-MM-DD. Defaults to today."},
+                    },
+                    "required": ["campaign_id"],
+                },
+            },
+        ]
+        handlers.update(
+            {
+                "hubspot_search_contacts": lambda a: _hubspot_search("contacts", a, hubspot_token=hubspot_token),
+                "hubspot_search_companies": lambda a: _hubspot_search("companies", a, hubspot_token=hubspot_token),
+                "hubspot_search_deals": lambda a: _hubspot_search("deals", a, hubspot_token=hubspot_token),
+                "hubspot_list_campaigns": lambda a: _hubspot_list_campaigns(a, hubspot_token=hubspot_token),
+                "hubspot_campaign_metrics": lambda a: _hubspot_campaign_metrics(a, hubspot_token=hubspot_token),
+            }
+        )
+
     return tools, handlers
 
 
@@ -362,6 +493,7 @@ def answer_question(
     anthropic_key: str,
     apollo_key: str | None = None,
     semrush_key: str | None = None,
+    hubspot_token: str | None = None,
 ) -> dict[str, Any]:
     """Answer a free-text question by letting Claude call the app's data tools.
 
@@ -370,7 +502,7 @@ def answer_question(
     to the model as error results rather than raised, so it can adapt.
     """
     client = anthropic.Anthropic(api_key=anthropic_key)
-    tools, handlers = _build_toolbox(apollo_key, semrush_key)
+    tools, handlers = _build_toolbox(apollo_key, semrush_key, hubspot_token)
 
     messages: list[dict[str, Any]] = [{"role": "user", "content": question}]
     tools_used: list[dict[str, Any]] = []
