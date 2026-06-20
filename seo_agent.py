@@ -28,6 +28,7 @@ from seo_hubspot import (
     aggregate_deals,
     campaign_metrics,
     list_campaigns,
+    list_properties,
     search_objects,
     traffic_sources,
 )
@@ -263,6 +264,19 @@ def _hubspot_deals_report(args: dict[str, Any], *, hubspot_token: str) -> Any:
         if args.get("end_date"):
             end_ms = _date_to_ms(args["end_date"], end_of_day=True)
 
+    # Translate the agent's simplified property filters into HubSpot's format.
+    extra_filters = []
+    for f in args.get("property_filters") or []:
+        prop = f.get("property")
+        if not prop:
+            continue
+        hf: dict[str, Any] = {"propertyName": prop, "operator": (f.get("operator") or "EQ").upper()}
+        if f.get("values") is not None:
+            hf["values"] = f["values"]
+        elif f.get("value") is not None:
+            hf["value"] = str(f["value"])
+        extra_filters.append(hf)
+
     has_date_filter = start_ms is not None or end_ms is not None
     result = aggregate_deals(
         hubspot_token,
@@ -272,6 +286,7 @@ def _hubspot_deals_report(args: dict[str, Any], *, hubspot_token: str) -> Any:
         date_property=date_property if has_date_filter else None,
         start_ms=start_ms,
         end_ms=end_ms,
+        extra_filters=extra_filters or None,
     )
     result["filter"] = {
         "only_closed_won": only_closed_won,
@@ -286,6 +301,16 @@ def _hubspot_deals_report(args: dict[str, Any], *, hubspot_token: str) -> Any:
         "deals fetched, not all of them."
     )
     return result
+
+
+def _hubspot_deal_properties(args: dict[str, Any], *, hubspot_token: str) -> Any:
+    props = list_properties(
+        "deals",
+        hubspot_token,
+        search=args.get("search"),
+        limit=min(int(args.get("limit", 60)), 100),
+    )
+    return {"count": len(props), "properties": props}
 
 
 def _hubspot_traffic(args: dict[str, Any], *, hubspot_token: str) -> Any:
@@ -558,6 +583,50 @@ def _build_toolbox(
                         },
                         "dealstage": {"type": "string", "description": "Filter to a specific deal stage id (optional)."},
                         "pipeline": {"type": "string", "description": "Filter to a specific pipeline id (optional)."},
+                        "property_filters": {
+                            "type": "array",
+                            "description": (
+                                "Filter on ANY deal property (e.g. deal source / "
+                                "lead source = Inbound, region, type). Discover "
+                                "the exact property name and valid values first "
+                                "with hubspot_deal_properties."
+                            ),
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "property": {"type": "string", "description": "Internal property name, e.g. deal_source."},
+                                    "operator": {
+                                        "type": "string",
+                                        "description": "EQ, NEQ, IN, NOT_IN, CONTAINS_TOKEN, HAS_PROPERTY, NOT_HAS_PROPERTY. Default EQ.",
+                                    },
+                                    "value": {"type": "string", "description": "Value for EQ/NEQ/CONTAINS_TOKEN."},
+                                    "values": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": "Values for IN/NOT_IN.",
+                                    },
+                                },
+                                "required": ["property"],
+                            },
+                        },
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "name": "hubspot_deal_properties",
+                "description": (
+                    "List deal properties (name, label, type, and allowed "
+                    "values for dropdowns). Use this to find the right field and "
+                    "value before filtering — e.g. search 'source' or 'lead' to "
+                    "find how inbound/outbound is recorded, then pass it to "
+                    "hubspot_deals_report's property_filters."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "search": {"type": "string", "description": "Only return properties whose name/label contains this text."},
+                        "limit": {"type": "integer", "description": "Max properties (<=100)."},
                     },
                     "required": [],
                 },
@@ -623,6 +692,7 @@ def _build_toolbox(
                 "hubspot_search_companies": lambda a: _hubspot_search("companies", a, hubspot_token=hubspot_token),
                 "hubspot_search_deals": lambda a: _hubspot_search("deals", a, hubspot_token=hubspot_token),
                 "hubspot_deals_report": lambda a: _hubspot_deals_report(a, hubspot_token=hubspot_token),
+                "hubspot_deal_properties": lambda a: _hubspot_deal_properties(a, hubspot_token=hubspot_token),
                 "hubspot_website_traffic": lambda a: _hubspot_traffic(a, hubspot_token=hubspot_token),
                 "hubspot_list_campaigns": lambda a: _hubspot_list_campaigns(a, hubspot_token=hubspot_token),
                 "hubspot_campaign_metrics": lambda a: _hubspot_campaign_metrics(a, hubspot_token=hubspot_token),

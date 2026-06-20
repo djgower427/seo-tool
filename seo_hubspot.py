@@ -129,6 +129,46 @@ _DEAL_REPORT_PROPS = [
 ]
 
 
+def list_properties(
+    object_type: str,
+    token: str,
+    *,
+    search: str | None = None,
+    limit: int = 60,
+) -> list[dict[str, Any]]:
+    """List an object's properties (name, label, type, and enum options).
+
+    Lets a caller discover the right field to filter on — e.g. find a "Deal
+    Source" / "Lead Source" property and the exact value that means "Inbound".
+    `search` filters to properties whose name or label contains the substring
+    (case-insensitive). Reading properties needs a crm.schemas.{object}.read
+    scope on the token.
+    """
+    payload = _request("GET", f"/crm/v3/properties/{object_type}", token)
+    needle = (search or "").strip().lower()
+    out: list[dict[str, Any]] = []
+    for p in payload.get("results", []):
+        name, label = p.get("name") or "", p.get("label") or ""
+        if needle and needle not in name.lower() and needle not in label.lower():
+            continue
+        item: dict[str, Any] = {
+            "name": name,
+            "label": label,
+            "type": p.get("type"),
+            "fieldType": p.get("fieldType"),
+        }
+        options = p.get("options") or []
+        if options:
+            item["options"] = [
+                {"label": o.get("label"), "value": o.get("value")}
+                for o in options[:50]
+            ]
+        out.append(item)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def aggregate_deals(
     token: str,
     *,
@@ -138,6 +178,7 @@ def aggregate_deals(
     date_property: str | None = None,
     start_ms: int | None = None,
     end_ms: int | None = None,
+    extra_filters: list[dict[str, Any]] | None = None,
     max_records: int = 10000,
 ) -> dict[str, Any]:
     """Count and sum (by `amount`) deals matching structured filters.
@@ -168,6 +209,8 @@ def aggregate_deals(
         filters.append({"propertyName": date_property, "operator": "GTE", "value": str(start_ms)})
     elif date_property and end_ms is not None:
         filters.append({"propertyName": date_property, "operator": "LTE", "value": str(end_ms)})
+    if extra_filters:
+        filters.extend(extra_filters)
 
     sort_prop = date_property or "createdate"
     filter_groups = [{"filters": filters}] if filters else []
