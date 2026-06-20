@@ -123,6 +123,105 @@ def search_objects(
     return out
 
 
+_DEAL_REPORT_PROPS = [
+    "dealname", "amount", "dealstage", "pipeline", "closedate",
+    "hs_closed_won_date", "hs_is_closed_won",
+]
+
+
+def aggregate_deals(
+    token: str,
+    *,
+    only_closed_won: bool = False,
+    dealstage: str | None = None,
+    pipeline: str | None = None,
+    date_property: str | None = None,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+    max_records: int = 10000,
+) -> dict[str, Any]:
+    """Count and sum (by `amount`) deals matching structured filters.
+
+    Uses the CRM Search API's filterGroups rather than full-text search, so it
+    can filter by closed-won status, deal stage, pipeline, and a date range on a
+    chosen date property (epoch-ms bounds). HubSpot returns an accurate `total`
+    for the count; we paginate (100/page, up to `max_records`) to sum `amount`.
+
+    `date_property` is e.g. "hs_closed_won_date" (when a deal entered closed
+    won) or "closedate". Pass start_ms/end_ms as epoch milliseconds.
+
+    Returns {count, summed_records, total_amount, truncated, deals(sample)}.
+    """
+    filters: list[dict[str, Any]] = []
+    if only_closed_won:
+        filters.append({"propertyName": "hs_is_closed_won", "operator": "EQ", "value": "true"})
+    if dealstage:
+        filters.append({"propertyName": "dealstage", "operator": "EQ", "value": dealstage})
+    if pipeline:
+        filters.append({"propertyName": "pipeline", "operator": "EQ", "value": pipeline})
+    if date_property and start_ms is not None and end_ms is not None:
+        filters.append({
+            "propertyName": date_property, "operator": "BETWEEN",
+            "value": str(start_ms), "highValue": str(end_ms),
+        })
+    elif date_property and start_ms is not None:
+        filters.append({"propertyName": date_property, "operator": "GTE", "value": str(start_ms)})
+    elif date_property and end_ms is not None:
+        filters.append({"propertyName": date_property, "operator": "LTE", "value": str(end_ms)})
+
+    sort_prop = date_property or "createdate"
+    filter_groups = [{"filters": filters}] if filters else []
+
+    results: list[dict[str, Any]] = []
+    after: str | None = None
+    total: int | None = None
+    while len(results) < max_records:
+        body: dict[str, Any] = {
+            "filterGroups": filter_groups,
+            "properties": _DEAL_REPORT_PROPS,
+            "sorts": [{"propertyName": sort_prop, "direction": "DESCENDING"}],
+            "limit": 100,
+        }
+        if after:
+            body["after"] = after
+        payload = _request("POST", "/crm/v3/objects/deals/search", token, json=body)
+        if total is None:
+            total = payload.get("total")
+        batch = payload.get("results", [])
+        results.extend(batch)
+        after = ((payload.get("paging") or {}).get("next") or {}).get("after")
+        if not after or not batch:
+            break
+
+    total_amount = 0.0
+    for r in results:
+        amt = (r.get("properties") or {}).get("amount")
+        try:
+            total_amount += float(amt) if amt not in (None, "") else 0.0
+        except (TypeError, ValueError):
+            pass
+
+    count = total if total is not None else len(results)
+    sample = []
+    for r in results[:25]:
+        p = r.get("properties") or {}
+        sample.append({
+            "id": r.get("id"),
+            "dealname": p.get("dealname"),
+            "amount": p.get("amount"),
+            "dealstage": p.get("dealstage"),
+            "closedate": p.get("closedate"),
+            "hs_closed_won_date": p.get("hs_closed_won_date"),
+        })
+    return {
+        "count": count,
+        "summed_records": len(results),
+        "total_amount": round(total_amount, 2),
+        "truncated": count > len(results),
+        "deals": sample,
+    }
+
+
 def list_campaigns(
     token: str,
     *,

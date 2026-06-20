@@ -13,6 +13,7 @@ schema and registering it in _build_toolbox — the loop and the view don't chan
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 import anthropic
@@ -24,6 +25,7 @@ from seo_apollo import (
 )
 from seo_claude import ClaudeError
 from seo_hubspot import (
+    aggregate_deals,
     campaign_metrics,
     list_campaigns,
     search_objects,
@@ -229,6 +231,59 @@ def _hubspot_search(
     return {"object": object_type, "count": len(results), "results": results}
 
 
+def _date_to_ms(d: str, *, end_of_day: bool = False) -> int:
+    """Parse a YYYY-MM-DD date into epoch milliseconds (UTC)."""
+    dt = datetime.strptime(d, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    if end_of_day:
+        dt = dt + timedelta(days=1) - timedelta(milliseconds=1)
+    return int(dt.timestamp() * 1000)
+
+
+def _hubspot_deals_report(args: dict[str, Any], *, hubspot_token: str) -> Any:
+    only_closed_won = bool(args.get("only_closed_won"))
+    # When entering closed-won is the question, hs_closed_won_date is the right
+    # field; otherwise default to closedate.
+    date_property = args.get("date_property") or (
+        "hs_closed_won_date" if only_closed_won else "closedate"
+    )
+
+    start_ms = end_ms = None
+    since_days = args.get("since_days")
+    if since_days is not None:
+        now = datetime.now(timezone.utc)
+        start_ms = int((now - timedelta(days=int(since_days))).timestamp() * 1000)
+        end_ms = int(now.timestamp() * 1000)
+    else:
+        if args.get("start_date"):
+            start_ms = _date_to_ms(args["start_date"])
+        if args.get("end_date"):
+            end_ms = _date_to_ms(args["end_date"], end_of_day=True)
+
+    has_date_filter = start_ms is not None or end_ms is not None
+    result = aggregate_deals(
+        hubspot_token,
+        only_closed_won=only_closed_won,
+        dealstage=args.get("dealstage"),
+        pipeline=args.get("pipeline"),
+        date_property=date_property if has_date_filter else None,
+        start_ms=start_ms,
+        end_ms=end_ms,
+    )
+    result["filter"] = {
+        "only_closed_won": only_closed_won,
+        "date_property": date_property if has_date_filter else None,
+        "since_days": since_days,
+        "start_date": args.get("start_date"),
+        "end_date": args.get("end_date"),
+    }
+    result["note"] = (
+        "total_amount sums the `amount` field across matching deals (portal "
+        "default currency). If truncated is true, total_amount covers only the "
+        "deals fetched, not all of them."
+    )
+    return result
+
+
 def _hubspot_list_campaigns(args: dict[str, Any], *, hubspot_token: str) -> Any:
     campaigns = list_campaigns(
         hubspot_token,
@@ -431,11 +486,47 @@ def _build_toolbox(
             {
                 "name": "hubspot_search_deals",
                 "description": (
-                    "Search OUR HubSpot CRM deals (name, amount, stage, "
-                    "pipeline, close date). Use for pipeline / deal / revenue "
-                    "questions about our business."
+                    "Full-text search OUR HubSpot CRM deals by name/keyword "
+                    "(e.g. find deals for a specific company). For COUNTS, "
+                    "REVENUE TOTALS, or DATE/STAGE-filtered questions, use "
+                    "hubspot_deals_report instead."
                 ),
                 "input_schema": _hs_query,
+            },
+            {
+                "name": "hubspot_deals_report",
+                "description": (
+                    "Count deals and sum their revenue (the `amount` field) with "
+                    "structured filters — the right tool for questions like 'how "
+                    "many closed-won deals in the last 365 days and total "
+                    "revenue'. Returns count, total_amount, and a sample. "
+                    "Set only_closed_won=true for won deals; date filtering uses "
+                    "hs_closed_won_date (when a deal ENTERED closed-won) by "
+                    "default for closed-won queries, or closedate otherwise — "
+                    "override with date_property if needed."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "only_closed_won": {
+                            "type": "boolean",
+                            "description": "Filter to deals currently in a closed-won stage.",
+                        },
+                        "since_days": {
+                            "type": "integer",
+                            "description": "Restrict to deals whose date_property is within the last N days (e.g. 365).",
+                        },
+                        "start_date": {"type": "string", "description": "YYYY-MM-DD lower bound (alternative to since_days)."},
+                        "end_date": {"type": "string", "description": "YYYY-MM-DD upper bound."},
+                        "date_property": {
+                            "type": "string",
+                            "description": "Which date field to filter on: hs_closed_won_date, closedate, or createdate.",
+                        },
+                        "dealstage": {"type": "string", "description": "Filter to a specific deal stage id (optional)."},
+                        "pipeline": {"type": "string", "description": "Filter to a specific pipeline id (optional)."},
+                    },
+                    "required": [],
+                },
             },
             {
                 "name": "hubspot_list_campaigns",
@@ -479,6 +570,7 @@ def _build_toolbox(
                 "hubspot_search_contacts": lambda a: _hubspot_search("contacts", a, hubspot_token=hubspot_token),
                 "hubspot_search_companies": lambda a: _hubspot_search("companies", a, hubspot_token=hubspot_token),
                 "hubspot_search_deals": lambda a: _hubspot_search("deals", a, hubspot_token=hubspot_token),
+                "hubspot_deals_report": lambda a: _hubspot_deals_report(a, hubspot_token=hubspot_token),
                 "hubspot_list_campaigns": lambda a: _hubspot_list_campaigns(a, hubspot_token=hubspot_token),
                 "hubspot_campaign_metrics": lambda a: _hubspot_campaign_metrics(a, hubspot_token=hubspot_token),
             }
