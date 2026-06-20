@@ -86,10 +86,13 @@ def render() -> None:
     if not result:
         return
 
+    # Escape '$' so Streamlit's markdown doesn't treat dollar amounts as LaTeX
+    # math (which silently strips spaces and stacks characters).
+    safe_answer = result["answer"].replace("$", "\\$")
+
     st.markdown(f"**Q:** {result['question']}")
     st.markdown("#### 🎱 Answer")
-    with st.container(border=True):
-        st.markdown(result["answer"])
+    st.markdown(safe_answer)
 
     tools_used = result.get("tools_used") or []
     if tools_used:
