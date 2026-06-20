@@ -42,6 +42,11 @@ nav = st.navigation(
             title="Competitor / Market Mapping",
             icon="🗺️",
         ),
+        st.Page(
+            "views/magic_eight_ball.py",
+            title="Magic Eight Ball",
+            icon="🎱",
+        ),
     ]
 )
 nav.run()
