@@ -265,6 +265,70 @@ def aggregate_deals(
     }
 
 
+def get_associations_batch(
+    from_object_type: str,
+    to_object_type: str,
+    ids: list[str],
+    token: str,
+) -> dict[str, list[str]]:
+    """Map each from-object id to its associated to-object ids (v4 batch read).
+
+    e.g. from_object_type="deals", to_object_type="companies" returns
+    {deal_id: [company_id, ...]}. Uses the v4 associations batch endpoint, so a
+    list of deals resolves in one call. Reading associations needs the relevant
+    crm.objects.*.read scopes on the token.
+    """
+    if not ids:
+        return {}
+    payload = _request(
+        "POST",
+        f"/crm/v4/associations/{from_object_type}/{to_object_type}/batch/read",
+        token,
+        json={"inputs": [{"id": str(i)} for i in ids]},
+    )
+    out: dict[str, list[str]] = {}
+    for row in payload.get("results", []):
+        frm = (row.get("from") or {}).get("id")
+        if frm is None:
+            continue
+        to_ids = [
+            str(t.get("toObjectId"))
+            for t in (row.get("to") or [])
+            if t.get("toObjectId") is not None
+        ]
+        out[str(frm)] = to_ids
+    return out
+
+
+def batch_read_objects(
+    object_type: str,
+    ids: list[str],
+    token: str,
+    *,
+    properties: list[str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Fetch properties for a list of object ids in one batch call.
+
+    Returns {id: {id, ...properties}} for the records HubSpot returns. Defaults
+    to the object type's standard readable properties.
+    """
+    if not ids:
+        return {}
+    props = properties or _DEFAULT_PROPS.get(object_type, [])
+    payload = _request(
+        "POST",
+        f"/crm/v3/objects/{object_type}/batch/read",
+        token,
+        json={"properties": props, "inputs": [{"id": str(i)} for i in ids]},
+    )
+    out: dict[str, dict[str, Any]] = {}
+    for r in payload.get("results", []):
+        rid = str(r.get("id"))
+        p = r.get("properties") or {}
+        out[rid] = {"id": r.get("id"), **{k: v for k, v in p.items() if v is not None}}
+    return out
+
+
 def list_campaigns(
     token: str,
     *,

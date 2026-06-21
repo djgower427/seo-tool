@@ -32,7 +32,9 @@ from seo_google import (
 )
 from seo_hubspot import (
     aggregate_deals,
+    batch_read_objects,
     campaign_metrics,
+    get_associations_batch,
     list_campaigns,
     list_properties,
     search_objects,
@@ -62,7 +64,10 @@ _SYSTEM = (
     "(organic, paid, direct, etc.) for any date range. Use when the question is "
     "about 'our' records, pipeline/deals, customers, campaigns, or our site's "
     "traffic. For year-over-year or YTD traffic, call the traffic tool twice "
-    "(this period and the matching period last year) and compare.\n"
+    "(this period and the matching period last year) and compare. To get the "
+    "companies or contacts ASSOCIATED with deals (or any CRM records), call "
+    "hubspot_get_associations with the record ids — e.g. take the deal ids from "
+    "hubspot_deals_report and resolve their associated companies/contacts.\n"
     "- Google Search Console tools: OUR site's organic Google Search performance "
     "— clicks, impressions, CTR, average position, and top queries/pages, for a "
     "date range.\n"
@@ -374,6 +379,52 @@ def _hubspot_campaign_metrics(args: dict[str, Any], *, hubspot_token: str) -> An
         start_date=args.get("start_date"),
         end_date=args.get("end_date"),
     )
+
+
+_HS_OBJECT_TYPES = {"deals", "companies", "contacts"}
+
+
+def _hubspot_associations(args: dict[str, Any], *, hubspot_token: str) -> Any:
+    """Resolve the records associated with a set of CRM records (e.g. each
+    deal's associated companies/contacts), returning their details."""
+    from_type = (args.get("from_object_type") or "deals").lower()
+    to_type = (args.get("to_object_type") or "").lower()
+    if from_type not in _HS_OBJECT_TYPES or to_type not in _HS_OBJECT_TYPES:
+        return {
+            "error": f"object types must be one of {sorted(_HS_OBJECT_TYPES)}",
+        }
+    ids = [str(i).strip() for i in (args.get("object_ids") or []) if str(i).strip()]
+    if not ids:
+        return {"error": "object_ids is required (e.g. deal ids from hubspot_deals_report)"}
+    ids = ids[:_MAX_ROWS]
+    per = min(int(args.get("limit", 10)), _MAX_ROWS)
+
+    assoc = get_associations_batch(from_type, to_type, ids, hubspot_token)
+
+    # Batch-read the details of every associated record once, then map back.
+    wanted: list[str] = []
+    for tids in assoc.values():
+        wanted.extend(tids[:per])
+    details = batch_read_objects(to_type, list(dict.fromkeys(wanted)), hubspot_token)
+
+    out = []
+    for fid in ids:
+        tids = assoc.get(fid, [])[:per]
+        out.append(
+            {
+                "from_id": fid,
+                to_type: [details.get(t, {"id": t}) for t in tids],
+            }
+        )
+    return {
+        "from_object_type": from_type,
+        "to_object_type": to_type,
+        "associations": out,
+        "note": (
+            "Empty lists mean no associations of that type are recorded on the "
+            "record (or the token lacks read scope for it)."
+        ),
+    }
 
 
 def _gsc_search(
@@ -821,6 +872,41 @@ def _build_toolbox(
                     "required": ["campaign_id"],
                 },
             },
+            {
+                "name": "hubspot_get_associations",
+                "description": (
+                    "Get the CRM records associated with a set of records — e.g. "
+                    "the companies and/or contacts linked to specific deals. Pass "
+                    "the record ids (deal ids come back in hubspot_deals_report's "
+                    "sample and hubspot_search_deals results) and the type you "
+                    "want back. Returns each record's associated objects with "
+                    "their details. Call once per target type (companies, then "
+                    "contacts) if you need both."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "object_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Record ids to look up associations for (e.g. deal ids).",
+                        },
+                        "to_object_type": {
+                            "type": "string",
+                            "description": "Associated type to return: companies, contacts, or deals.",
+                        },
+                        "from_object_type": {
+                            "type": "string",
+                            "description": "Type of the object_ids: deals (default), companies, or contacts.",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max associated records per id (<=25, default 10).",
+                        },
+                    },
+                    "required": ["object_ids", "to_object_type"],
+                },
+            },
         ]
         handlers.update(
             {
@@ -832,6 +918,7 @@ def _build_toolbox(
                 "hubspot_website_traffic": lambda a: _hubspot_traffic(a, hubspot_token=hubspot_token),
                 "hubspot_list_campaigns": lambda a: _hubspot_list_campaigns(a, hubspot_token=hubspot_token),
                 "hubspot_campaign_metrics": lambda a: _hubspot_campaign_metrics(a, hubspot_token=hubspot_token),
+                "hubspot_get_associations": lambda a: _hubspot_associations(a, hubspot_token=hubspot_token),
             }
         )
 
