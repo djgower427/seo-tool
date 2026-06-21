@@ -19,6 +19,7 @@ from seo_apollo import (
     people_search,
     person_match,
 )
+import seo_usage
 from seo_claude import ClaudeError, expand_job_function
 from seo_keys import get_anthropic_key, get_apollo_key, normalize_domain
 
@@ -254,6 +255,7 @@ def render() -> None:
                     "Secrets, or leave Job function empty to skip title expansion."
                 )
                 return
+            expand_tracker = seo_usage.start()
             with st.spinner(f"Asking Claude for titles related to “{function}”…"):
                 try:
                     titles = list(
@@ -265,8 +267,12 @@ def render() -> None:
                         )
                     )
                 except ClaudeError as e:
+                    expand_tracker.finish()
                     st.error(f"Claude — {e}")
                     return
+            expand_tracker.finish()
+            # Rendered by render_pending() at the top of the results below.
+            seo_usage.stash_pending(expand_tracker.summary_md())
 
         st.session_state["_find_contacts_query"] = {
             "domain": normalize_domain(domain_input),
@@ -280,6 +286,11 @@ def render() -> None:
     query = st.session_state.get("_find_contacts_query")
     if not query:
         return
+
+    # Show usage from the action that triggered this run — the title expansion
+    # (this run) or a reveal/enrich from the previous run (stashed before its
+    # st.rerun()). People search itself is free, so no tracker around it.
+    seo_usage.render_pending(st.empty())
 
     with st.spinner("Searching Apollo…"):
         try:
@@ -406,7 +417,10 @@ def render() -> None:
     )
 
     if reveal_emails_btn:
+        reveal_tracker = seo_usage.start(apollo_key=api_key)
         ok, skipped, errors = _do_reveals(selected_ids, api_key)
+        reveal_tracker.finish()
+        seo_usage.stash_pending(reveal_tracker.summary_md())
         msg = f"Revealed {ok} new contact(s)."
         if skipped:
             msg += f" {skipped} were already revealed this session (no charge)."
@@ -416,7 +430,10 @@ def render() -> None:
         st.rerun()  # re-render table with revealed emails merged in
 
     if reveal_names_btn:
+        enrich_tracker = seo_usage.start(apollo_key=api_key)
         ok, errors = _auto_enrich(people, api_key)
+        enrich_tracker.finish()
+        seo_usage.stash_pending(enrich_tracker.summary_md())
         st.success(f"Revealed full names for {ok} contact(s).")
         for err in errors:
             st.error(f"Name reveal failed — {err}")

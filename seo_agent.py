@@ -39,6 +39,7 @@ from seo_hubspot import (
     traffic_sources,
 )
 from seo_keys import normalize_domain
+import seo_usage
 from seo_semrush import (
     domain_organic_keywords,
     domain_overview,
@@ -959,6 +960,8 @@ def answer_question(
             ) from None
         except anthropic.APIError as e:
             raise ClaudeError(f"Anthropic API error: {e}") from None
+
+        seo_usage.record_claude(_AGENT_MODEL, response.usage)
 
         if response.stop_reason != "tool_use":
             answer = "".join(

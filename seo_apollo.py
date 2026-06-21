@@ -11,6 +11,8 @@ from typing import Any
 
 import httpx
 
+import seo_usage
+
 APOLLO_BASE = "https://api.apollo.io/api/v1"
 
 # Match the key anywhere it might leak into an error string: header value,
@@ -64,6 +66,53 @@ def _request(
         raise ApolloError(f"non-JSON response: {_redact(r.text[:200])}") from None
 
 
+def _scan_consumed_credits(obj: Any) -> int | None:
+    """Best-effort: pull a 'credits consumed this billing cycle' total out of
+    Apollo's usage_stats payload.
+
+    Apollo's usage_stats schema isn't publicly documented and may vary, so we
+    walk the JSON and sum integer values whose key names clearly mean
+    "credits consumed/used" (e.g. email_credits_used, credits_consumed). Returns
+    None when nothing matches, so the caller falls back to the cost model rather
+    than display a number we can't trust.
+    """
+    total: int | None = None
+
+    def _looks_consumed(key: str) -> bool:
+        k = key.lower()
+        return "credit" in k and ("used" in k or "consumed" in k or "spent" in k)
+
+    def _walk(node: Any) -> None:
+        nonlocal total
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and _looks_consumed(k):
+                    total = (total or 0) + int(v)
+                else:
+                    _walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                _walk(v)
+
+    _walk(obj)
+    return total
+
+
+def credits_consumed_this_cycle(api_key: str) -> int | None:
+    """Total Apollo credits consumed in the current billing cycle, or None.
+
+    Hits /usage_stats/api_usage_stats, which requires a MASTER API key — an
+    ordinary key gets a 403, and we return None so usage tracking falls back to
+    the cost model. Also returns None if the payload has no recognizable
+    consumed-credits field. Never raises into the caller.
+    """
+    try:
+        payload = _request("POST", "/usage_stats/api_usage_stats", api_key)
+    except ApolloError:
+        return None
+    return _scan_consumed_credits(payload)
+
+
 def organization_enrich(domain: str, api_key: str) -> dict[str, Any] | None:
     """Look up a company by domain and return Apollo's organization record.
 
@@ -81,6 +130,7 @@ def organization_enrich(domain: str, api_key: str) -> dict[str, Any] | None:
         api_key,
         params={"domain": domain},
     )
+    seo_usage.record_apollo_credits(1)  # 1 credit per enrich
     org = payload.get("organization")
     return org if isinstance(org, dict) and org else None
 
@@ -183,12 +233,14 @@ def organization_search(
     if locations:
         body["organization_locations"] = locations
 
-    return _request(
+    result = _request(
         "POST",
         "/mixed_companies/search",
         api_key,
         json=body,
     )
+    seo_usage.record_apollo_credits(1)  # company search consumes ~1 credit per call
+    return result
 
 
 def person_match(
@@ -224,6 +276,9 @@ def person_match(
             "reveal_personal_emails": reveal_personal_emails,
         },
     )
+    # /people/match bills 1 credit per row whether or not an email is revealed
+    # (matches the per-row cost the UI already quotes for name reveals).
+    seo_usage.record_apollo_credits(1)
     person = payload.get("person")
     return person if isinstance(person, dict) and person else None
 

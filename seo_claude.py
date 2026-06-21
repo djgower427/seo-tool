@@ -16,6 +16,8 @@ from typing import Any
 
 import anthropic
 
+import seo_usage
+
 _MAX_TITLES = 20
 _MODEL = "claude-haiku-4-5"
 
@@ -90,6 +92,8 @@ def expand_job_function(
         ) from None
     except anthropic.APIError as e:
         raise ClaudeError(f"Anthropic API error: {e}") from None
+
+    seo_usage.record_claude(_MODEL, response.usage)
 
     try:
         text = next(b.text for b in response.content if b.type == "text")
@@ -214,6 +218,8 @@ def build_similar_company_query(
         ) from None
     except anthropic.APIError as e:
         raise ClaudeError(f"Anthropic API error: {e}") from None
+
+    seo_usage.record_claude(_MODEL, response.usage)
 
     try:
         text = next(b.text for b in response.content if b.type == "text")
@@ -373,6 +379,8 @@ def recommend_keyword_to_steal(
     except anthropic.APIError as e:
         raise ClaudeError(f"Anthropic API error: {e}") from None
 
+    seo_usage.record_claude(_RECOMMEND_MODEL, response.usage)
+
     try:
         text = next(b.text for b in response.content if b.type == "text")
         data = json.loads(text)
@@ -427,6 +435,8 @@ def summarize_offerings(domain: str, page_text: str, api_key: str) -> str:
         ) from None
     except anthropic.APIError as e:
         raise ClaudeError(f"Anthropic API error: {e}") from None
+
+    seo_usage.record_claude(_MODEL, response.usage)
 
     text = "".join(b.text for b in response.content if b.type == "text").strip()
     if not text:

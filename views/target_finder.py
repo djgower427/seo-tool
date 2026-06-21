@@ -17,6 +17,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+import seo_usage
 from seo_apollo import ApolloError, organization_search
 from seo_keys import get_apollo_key
 
@@ -271,6 +272,10 @@ def render() -> None:
     if not query:
         return
 
+    # Measure the Apollo credit spend around the search (cache hits cost 0), and
+    # surface it at the top of the results.
+    usage_slot = st.empty()
+    tracker = seo_usage.start(apollo_key=apollo_key)
     with st.spinner("Searching Apollo for companies…"):
         try:
             result = _cached_company_search(
@@ -285,8 +290,12 @@ def render() -> None:
                 _SEARCH_CACHE_VERSION,
             )
         except ApolloError as e:
+            tracker.finish()
+            tracker.render(usage_slot)
             st.error(f"Apollo — {e}")
             return
+    tracker.finish()
+    tracker.render(usage_slot)
 
     orgs_raw = result.get("organizations") or []
     accounts_raw = result.get("accounts") or []

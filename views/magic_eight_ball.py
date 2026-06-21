@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+import seo_usage
 from seo_agent import answer_question
 from seo_claude import ClaudeError
 from seo_keys import (
@@ -79,6 +80,13 @@ def render() -> None:
         if not question.strip():
             st.error("Type a question first.")
             return
+        # The agent may touch several allowances in one question: Semrush units
+        # and Apollo credits (real balance deltas), Claude tokens (recorded in
+        # the agent loop), plus rate-limited HubSpot/Google calls. Measure them
+        # around the whole run and stash the summary so it survives reruns.
+        usage_tracker = seo_usage.start(
+            semrush_key=semrush_key, apollo_key=apollo_key
+        )
         with st.spinner("Consulting the eight ball…"):
             try:
                 result = answer_question(
@@ -92,9 +100,22 @@ def render() -> None:
                     google_ads_config=google_ads_config,
                 )
             except ClaudeError as e:
+                usage_tracker.finish()
                 st.error(f"Claude — {e}")
                 return
-        st.session_state["_meb_result"] = {"question": question.strip(), **result}
+        # Count the rate-limited providers the agent actually called.
+        for t in result.get("tools_used") or []:
+            name = t.get("name", "")
+            if name.startswith("hubspot"):
+                seo_usage.record_call("hubspot")
+            elif name.startswith("gsc") or name.startswith("google_ads"):
+                seo_usage.record_call("google")
+        usage_tracker.finish()
+        st.session_state["_meb_result"] = {
+            "question": question.strip(),
+            "usage_md": usage_tracker.summary_md(),
+            **result,
+        }
 
     result = st.session_state.get("_meb_result")
     if not result:
@@ -103,6 +124,10 @@ def render() -> None:
     # Escape '$' so Streamlit's markdown doesn't treat dollar amounts as LaTeX
     # math (which silently strips spaces and stacks characters).
     safe_answer = result["answer"].replace("$", "\\$")
+
+    usage_md = result.get("usage_md")
+    if usage_md:
+        st.info(usage_md)
 
     st.markdown(f"**Q:** {result['question']}")
     st.markdown("#### 🎱 Answer")

@@ -12,6 +12,11 @@ import httpx
 
 SEMRUSH_BASE = "https://api.semrush.com/"
 
+# Free endpoint that returns the remaining API-unit balance as a plain integer.
+# Does NOT itself consume units, so it's safe to call before and after a billable
+# request to measure exact consumption.
+SEMRUSH_UNITS_URL = "https://www.semrush.com/users/countapiunits.html"
+
 _KEY_RE = re.compile(r"(key=)[^&\s]+", re.IGNORECASE)
 
 
@@ -104,6 +109,27 @@ def _request(params: dict[str, str]) -> list[dict[str, str]]:
     lines = text.splitlines()
     header = _normalize_headers(lines[0].split(";"))
     return [dict(zip(header, line.split(";"))) for line in lines[1:]]
+
+
+def units_balance(api_key: str) -> int | None:
+    """Remaining Semrush API units for this key, or None if it can't be read.
+
+    Hits the free countapiunits endpoint, which returns the balance as a bare
+    integer (e.g. "10000"). This call doesn't consume units. Returns None on any
+    transport/parse error so callers (usage tracking) can degrade gracefully
+    rather than break the page.
+    """
+    try:
+        r = httpx.get(SEMRUSH_UNITS_URL, params={"key": api_key}, timeout=15.0)
+    except httpx.HTTPError:
+        return None
+    if r.status_code >= 400:
+        return None
+    text = r.text.strip()
+    try:
+        return int(text)
+    except ValueError:
+        return None
 
 
 def domain_organic_keywords(

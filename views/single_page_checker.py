@@ -16,6 +16,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from fpdf import FPDF
 
+import seo_usage
 from seo_review import (
     MODEL,
     build_prompt,
@@ -45,8 +46,12 @@ def normalize_url(raw: str) -> str:
     return raw
 
 
-def stream_review(client: Anthropic, prompt: str):
-    """Yield text chunks from a streamed Claude response."""
+def stream_review(client: Anthropic, prompt: str, usage_out: dict | None = None):
+    """Yield text chunks from a streamed Claude response.
+
+    After the stream is fully consumed, stashes the final message's token usage
+    into `usage_out` (if given) so the caller can report consumption.
+    """
     with client.messages.stream(
         model=MODEL,
         max_tokens=8192,
@@ -54,6 +59,8 @@ def stream_review(client: Anthropic, prompt: str):
     ) as stream:
         for text in stream.text_stream:
             yield text
+        if usage_out is not None:
+            usage_out["usage"] = stream.get_final_message().usage
 
 
 def run_review(url: str, api_key: str) -> dict:
@@ -87,9 +94,12 @@ def run_review(url: str, api_key: str) -> dict:
         # Live stream into a temporary placeholder so the user sees tokens arrive,
         # then clear it so the final tabbed render_result takes over.
         stream_placeholder = st.empty()
+        usage_holder: dict = {}
         with stream_placeholder.container():
-            full_text = st.write_stream(stream_review(client, prompt))
+            full_text = st.write_stream(stream_review(client, prompt, usage_holder))
         stream_placeholder.empty()
+        # Report Claude token consumption to the active usage tracker (if any).
+        seo_usage.record_claude(MODEL, usage_holder.get("usage"))
 
         status.update(label=f"Review complete — {final_url}", state="complete")
 
@@ -282,11 +292,18 @@ def render() -> None:
 
     if submitted and url_input.strip():
         url = normalize_url(url_input)
+        # Reserve the top-of-result spot, then measure Claude token usage for
+        # this review (pay-as-you-go, so consumed-only — no fixed balance).
+        usage_slot = st.empty()
+        tracker = seo_usage.start()
         try:
             result = run_review(url, api_key)
         except httpx.HTTPError as e:
+            tracker.finish()
             st.error(f"Failed to fetch the page: {e}")
             return
+        tracker.finish()
+        tracker.render(usage_slot)
         st.session_state["history"].append(result)
         st.divider()
         render_result(result)

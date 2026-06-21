@@ -22,6 +22,7 @@ import httpx
 import pandas as pd
 import streamlit as st
 
+import seo_usage
 from seo_claude import ClaudeError, recommend_keyword_to_steal, summarize_offerings
 from seo_keys import get_anthropic_key, get_semrush_key, normalize_domain
 from seo_review import extract_page_data, fetch_page
@@ -346,6 +347,16 @@ def render() -> None:
     if not q:
         return
 
+    # Track Semrush units (exact balance delta) and any Claude tokens spent on
+    # the recommendation, and show the total at the top of the results. Called
+    # at every exit point; finish() is idempotent so repeat calls are safe.
+    usage_slot = st.empty()
+    tracker = seo_usage.start(semrush_key=semrush_key)
+
+    def _show_usage() -> None:
+        tracker.finish()
+        tracker.render(usage_slot)
+
     st.caption(
         f"Comparing **{q['seed']}** (competitor) against **{q['ours']}** (us) in "
         f"the `{q['database']}` database."
@@ -357,6 +368,7 @@ def render() -> None:
                 q["seed"], q["database"], semrush_key, q["keyword_pool"], _CACHE_VERSION
             )
         except SemrushError as e:
+            _show_usage()
             st.error(f"Semrush (competitor) — {e}")
             return
         try:
@@ -364,10 +376,12 @@ def render() -> None:
                 q["ours"], q["database"], semrush_key, q["keyword_pool"], _CACHE_VERSION
             )
         except SemrushError as e:
+            _show_usage()
             st.error(f"Semrush (us) — {e}")
             return
 
     if not competitor_kws:
+        _show_usage()
         st.warning(
             f"Semrush returned no organic keywords for `{q['seed']}` in the "
             f"`{q['database']}` database. Try a different database."
@@ -390,6 +404,7 @@ def render() -> None:
     )
 
     if not candidates:
+        _show_usage()
         st.info(
             "No steal-able keywords under these filters. Loosen the difficulty "
             "or volume thresholds, or widen the competitor position cap."
@@ -429,6 +444,8 @@ def render() -> None:
 
     st.subheader("Steal-able keywords")
     _render_steal_table(candidates)
+
+    _show_usage()
 
 
 render()

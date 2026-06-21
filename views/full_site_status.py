@@ -8,6 +8,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+import seo_usage
 from seo_apollo import ApolloError, organization_enrich
 from seo_keys import get_apollo_key, get_semrush_key, normalize_domain
 from seo_semrush import (
@@ -291,6 +292,16 @@ def render() -> None:
 
     domain = normalize_domain(domain_input)
 
+    # Reserve a spot at the top of the results for the consumed/remaining line,
+    # then measure real Semrush (and optional Apollo) balance deltas around all
+    # the billable calls below. Cache hits make no API call, so they read as
+    # "0 used".
+    usage_slot = st.empty()
+    tracker = seo_usage.start(
+        semrush_key=api_key,
+        apollo_key=apollo_key if (enrich_with_apollo and apollo_key) else None,
+    )
+
     def _safe_call(label: str, fn, *args):
         try:
             return fn(*args)
@@ -339,6 +350,9 @@ def render() -> None:
             render_apollo(apollo_org)
         elif apollo_ok:
             st.info(f"Apollo has no record for `{domain}`.")
+
+    tracker.finish()
+    tracker.render(usage_slot)
 
 
 render()
