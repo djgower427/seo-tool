@@ -14,6 +14,9 @@ from seo_claude import ClaudeError
 from seo_keys import (
     get_anthropic_key,
     get_apollo_key,
+    get_google_ads_config,
+    get_google_oauth_creds,
+    get_gsc_site,
     get_hubspot_token,
     get_semrush_key,
 )
@@ -26,6 +29,9 @@ def render() -> None:
     apollo_key = get_apollo_key()
     semrush_key = get_semrush_key()
     hubspot_token = get_hubspot_token()
+    google_oauth = get_google_oauth_creds()
+    gsc_site = get_gsc_site()
+    google_ads_config = get_google_ads_config()
 
     if not anthropic_key:
         st.error(
@@ -39,21 +45,26 @@ def render() -> None:
         sources.append("Apollo (market companies & contacts)")
     if hubspot_token:
         sources.append("HubSpot (our CRM & campaigns)")
+    if google_oauth:
+        sources.append("Google Search Console (our organic search)")
+    if google_oauth and google_ads_config:
+        sources.append("Google Ads (our paid search)")
     if semrush_key:
         sources.append("Semrush (SEO & keywords)")
     if sources:
         st.caption(
             "I can pull from: " + ", ".join(sources) + ". Ask about a company's "
-            "size/revenue/tech, its SEO traffic and keywords, our CRM "
-            "contacts/companies/deals, our website traffic by source, marketing "
-            "campaign metrics, or companies matching criteria. Answering may "
-            "consume Apollo/Semrush credits."
+            "size/revenue/tech, SEO traffic and keywords, our CRM "
+            "contacts/companies/deals, our website traffic, marketing campaign "
+            "metrics, our organic Google clicks/queries, or our ad spend & "
+            "performance. Answering may consume Apollo/Semrush credits."
         )
     else:
         st.warning(
             "No data sources are connected (set `APOLLO_API_KEY`, "
-            "`SEMRUSH_API_KEY`, and/or `HUBSPOT_ACCESS_TOKEN`). I can only "
-            "answer from general reasoning, not live data, until one is added."
+            "`SEMRUSH_API_KEY`, `HUBSPOT_ACCESS_TOKEN`, and/or Google OAuth "
+            "secrets). I can only answer from general reasoning, not live data, "
+            "until one is added."
         )
 
     with st.form("magic-eight-ball-form"):
@@ -76,6 +87,9 @@ def render() -> None:
                     apollo_key=apollo_key,
                     semrush_key=semrush_key,
                     hubspot_token=hubspot_token,
+                    google_oauth=google_oauth,
+                    gsc_site=gsc_site,
+                    google_ads_config=google_ads_config,
                 )
             except ClaudeError as e:
                 st.error(f"Claude — {e}")

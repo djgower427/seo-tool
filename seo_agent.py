@@ -24,6 +24,12 @@ from seo_apollo import (
     people_search,
 )
 from seo_claude import ClaudeError
+from seo_google import (
+    GoogleError,
+    ads_search,
+    gsc_list_sites,
+    gsc_search_analytics,
+)
 from seo_hubspot import (
     aggregate_deals,
     campaign_metrics,
@@ -56,11 +62,19 @@ _SYSTEM = (
     "about 'our' records, pipeline/deals, customers, campaigns, or our site's "
     "traffic. For year-over-year or YTD traffic, call the traffic tool twice "
     "(this period and the matching period last year) and compare.\n"
-    "- Semrush tools: SEO data — organic traffic/keywords, keyword difficulty, "
-    "and top pages for a domain.\n\n"
+    "- Google Search Console tools: OUR site's organic Google Search performance "
+    "— clicks, impressions, CTR, average position, and top queries/pages, for a "
+    "date range.\n"
+    "- Google Ads tools: OUR paid search performance — campaign / ad group / "
+    "keyword impressions, clicks, cost, and conversions for a date range.\n"
+    "- Semrush tools: THIRD-PARTY SEO estimates — organic traffic/keywords, "
+    "keyword difficulty, and top pages for any domain.\n\n"
     "Pick the right source: 'our deals/pipeline/customers/campaigns' → HubSpot; "
-    "'find/look up a company or its people in the market' → Apollo; 'SEO / "
-    "traffic / keywords' → Semrush. Call the tool(s), and base your answer ONLY "
+    "'our organic Google clicks/impressions/queries' → Google Search Console; "
+    "'our ad spend/paid performance' → Google Ads; 'find/look up a company or "
+    "its people in the market' → Apollo; third-party 'SEO estimate / keyword "
+    "difficulty / a competitor's traffic' → Semrush. Call the tool(s), and base "
+    "your answer ONLY "
     "on what they return — never invent numbers or facts. Keep the final answer "
     "brief: 2-4 plain sentences, leading with the direct answer. If the "
     "available tools can't answer the question, say so in one sentence and name "
@@ -361,6 +375,124 @@ def _hubspot_campaign_metrics(args: dict[str, Any], *, hubspot_token: str) -> An
     )
 
 
+def _gsc_search(
+    args: dict[str, Any], *, google_oauth: dict[str, str], default_site: str | None
+) -> Any:
+    site = args.get("site_url") or default_site
+    if not site:
+        raise GoogleError(
+            "No Search Console site given and no default GSC_SITE_URL is set — "
+            "call gsc_list_sites to find the property URL, then pass site_url."
+        )
+    dims = args.get("dimensions")
+    if dims is None:
+        dims = ["query"]
+    data = gsc_search_analytics(
+        google_oauth,
+        site,
+        args["start_date"],
+        args["end_date"],
+        dimensions=dims,
+        row_limit=min(int(args.get("row_limit", 25)), 100),
+    )
+    data["site_url"] = site
+    return data
+
+
+def _gsc_sites(args: dict[str, Any], *, google_oauth: dict[str, str]) -> Any:
+    return {"sites": gsc_list_sites(google_oauth)}
+
+
+def _distill_ads_row(r: dict[str, Any]) -> dict[str, Any]:
+    camp = r.get("campaign") or {}
+    ag = r.get("adGroup") or {}
+    kw = (r.get("adGroupCriterion") or {}).get("keyword") or {}
+    m = r.get("metrics") or {}
+
+    def _i(v: Any) -> int:
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return 0
+
+    def _f(v: Any) -> float:
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    row: dict[str, Any] = {
+        "campaign": camp.get("name"),
+        "impressions": _i(m.get("impressions")),
+        "clicks": _i(m.get("clicks")),
+        "cost": round(_i(m.get("costMicros")) / 1_000_000, 2),
+        "conversions": round(_f(m.get("conversions")), 2),
+        "ctr": round(_f(m.get("ctr")), 4),
+        "avg_cpc": round(_i(m.get("averageCpc")) / 1_000_000, 2),
+    }
+    if ag.get("name"):
+        row["ad_group"] = ag.get("name")
+    if kw.get("text"):
+        row["keyword"] = kw.get("text")
+    return row
+
+
+_ADS_LEVELS = {
+    "campaign": ("campaign", "campaign.name, campaign.status"),
+    "ad_group": ("ad_group", "campaign.name, ad_group.name, ad_group.status"),
+    "keyword": ("keyword_view", "campaign.name, ad_group.name, ad_group_criterion.keyword.text"),
+}
+
+
+def _ads_report(
+    args: dict[str, Any], *, google_oauth: dict[str, str], ads_config: dict[str, str]
+) -> Any:
+    level = (args.get("level") or "campaign").lower()
+    resource, select_dims = _ADS_LEVELS.get(level, _ADS_LEVELS["campaign"])
+
+    since_days = args.get("since_days")
+    if since_days is not None:
+        end = datetime.now(timezone.utc).date()
+        start_s = (end - timedelta(days=int(since_days))).isoformat()
+        end_s = end.isoformat()
+    else:
+        start_s, end_s = args.get("start_date"), args.get("end_date")
+    if not start_s or not end_s:
+        raise GoogleError("Provide either since_days, or both start_date and end_date.")
+
+    limit = min(int(args.get("limit", 25)), 100)
+    metrics = (
+        "metrics.impressions, metrics.clicks, metrics.cost_micros, "
+        "metrics.conversions, metrics.ctr, metrics.average_cpc"
+    )
+    query = (
+        f"SELECT {select_dims}, {metrics} FROM {resource} "
+        f"WHERE segments.date BETWEEN '{start_s}' AND '{end_s}' "
+        f"ORDER BY metrics.cost_micros DESC LIMIT {limit}"
+    )
+    results = ads_search(
+        google_oauth,
+        ads_config["customer_id"],
+        query,
+        developer_token=ads_config["developer_token"],
+        login_customer_id=ads_config.get("login_customer_id"),
+    )
+    rows = [_distill_ads_row(r) for r in results]
+    return {
+        "level": level,
+        "start_date": start_s,
+        "end_date": end_s,
+        "rows": rows,
+        "totals": {
+            "cost": round(sum(r["cost"] for r in rows), 2),
+            "clicks": sum(r["clicks"] for r in rows),
+            "impressions": sum(r["impressions"] for r in rows),
+            "conversions": round(sum(r["conversions"] for r in rows), 2),
+        },
+        "note": "cost is in account currency; only the top rows by cost are returned.",
+    }
+
+
 # ── Toolbox assembly ─────────────────────────────────────────────────────────
 
 _DOMAIN_PROP = {"type": "string", "description": "Company domain, e.g. stripe.com"}
@@ -374,6 +506,9 @@ def _build_toolbox(
     apollo_key: str | None,
     semrush_key: str | None,
     hubspot_token: str | None,
+    google_oauth: dict[str, str] | None,
+    gsc_site: str | None,
+    google_ads_config: dict[str, str] | None,
 ) -> tuple[list[dict[str, Any]], dict[str, Callable[[dict[str, Any]], Any]]]:
     """Return (tool schemas, name->handler) for the data sources whose keys are
     set, so Claude is only offered tools it can actually run."""
@@ -699,6 +834,80 @@ def _build_toolbox(
             }
         )
 
+    if google_oauth:
+        tools += [
+            {
+                "name": "gsc_search_analytics",
+                "description": (
+                    "Our site's organic Google Search performance from Search "
+                    "Console: clicks, impressions, CTR, and average position over "
+                    "a date range. Break down by dimensions (query, page, "
+                    "country, device, date) for top queries/pages, or pass an "
+                    "empty dimensions list for totals. For period-over-period, "
+                    "call twice and compare."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "start_date": {"type": "string", "description": "YYYY-MM-DD (inclusive)."},
+                        "end_date": {"type": "string", "description": "YYYY-MM-DD (inclusive)."},
+                        "dimensions": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "e.g. ['query'], ['page'], ['date']; [] for totals only.",
+                        },
+                        "row_limit": {"type": "integer", "description": "Max rows (<=100)."},
+                        "site_url": {
+                            "type": "string",
+                            "description": "Property URL (sc-domain:example.com or https://example.com/). Omit to use the default; use gsc_list_sites to discover.",
+                        },
+                    },
+                    "required": ["start_date", "end_date"],
+                },
+            },
+            {
+                "name": "gsc_list_sites",
+                "description": "List the Search Console properties we have access to (use to find the site_url).",
+                "input_schema": {"type": "object", "properties": {}, "required": []},
+            },
+        ]
+        handlers.update(
+            {
+                "gsc_search_analytics": lambda a: _gsc_search(a, google_oauth=google_oauth, default_site=gsc_site),
+                "gsc_list_sites": lambda a: _gsc_sites(a, google_oauth=google_oauth),
+            }
+        )
+
+        if google_ads_config:
+            tools.append(
+                {
+                    "name": "google_ads_report",
+                    "description": (
+                        "Our Google Ads (paid search) performance — impressions, "
+                        "clicks, cost, conversions, CTR, avg CPC — over a date "
+                        "range, broken down by campaign (default), ad_group, or "
+                        "keyword. Returns per-row metrics plus totals."
+                    ),
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "level": {
+                                "type": "string",
+                                "description": "campaign | ad_group | keyword. Default campaign.",
+                            },
+                            "since_days": {"type": "integer", "description": "Last N days (alternative to start/end)."},
+                            "start_date": {"type": "string", "description": "YYYY-MM-DD."},
+                            "end_date": {"type": "string", "description": "YYYY-MM-DD."},
+                            "limit": {"type": "integer", "description": "Max rows by cost (<=100)."},
+                        },
+                        "required": [],
+                    },
+                }
+            )
+            handlers["google_ads_report"] = lambda a: _ads_report(
+                a, google_oauth=google_oauth, ads_config=google_ads_config
+            )
+
     return tools, handlers
 
 
@@ -709,6 +918,9 @@ def answer_question(
     apollo_key: str | None = None,
     semrush_key: str | None = None,
     hubspot_token: str | None = None,
+    google_oauth: dict[str, str] | None = None,
+    gsc_site: str | None = None,
+    google_ads_config: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Answer a free-text question by letting Claude call the app's data tools.
 
@@ -717,7 +929,9 @@ def answer_question(
     to the model as error results rather than raised, so it can adapt.
     """
     client = anthropic.Anthropic(api_key=anthropic_key)
-    tools, handlers = _build_toolbox(apollo_key, semrush_key, hubspot_token)
+    tools, handlers = _build_toolbox(
+        apollo_key, semrush_key, hubspot_token, google_oauth, gsc_site, google_ads_config
+    )
 
     # Give the model today's date so it can resolve relative ranges (YTD, last
     # year, last 30 days) itself.
