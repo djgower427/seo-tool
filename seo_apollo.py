@@ -66,60 +66,16 @@ def _request(
         raise ApolloError(f"non-JSON response: {_redact(r.text[:200])}") from None
 
 
-def _scan_consumed_credits(obj: Any) -> int | None:
-    """Best-effort: pull a 'credits consumed this billing cycle' total out of
-    Apollo's usage_stats payload.
+def api_usage_stats(api_key: str) -> dict[str, Any]:
+    """Per-endpoint API rate-limit usage (MASTER key required).
 
-    Apollo's usage_stats schema isn't publicly documented and may vary, so we
-    walk the JSON and sum integer values whose key names clearly mean
-    "credits consumed/used" (e.g. email_credits_used, credits_consumed). Returns
-    None when nothing matches, so the caller falls back to the cost model rather
-    than display a number we can't trust.
-    """
-    total: int | None = None
-
-    def _looks_consumed(key: str) -> bool:
-        k = key.lower()
-        return "credit" in k and ("used" in k or "consumed" in k or "spent" in k)
-
-    def _walk(node: Any) -> None:
-        nonlocal total
-        if isinstance(node, dict):
-            for k, v in node.items():
-                if isinstance(v, (int, float)) and not isinstance(v, bool) and _looks_consumed(k):
-                    total = (total or 0) + int(v)
-                else:
-                    _walk(v)
-        elif isinstance(node, list):
-            for v in node:
-                _walk(v)
-
-    _walk(obj)
-    return total
-
-
-def raw_usage_stats(api_key: str) -> dict[str, Any]:
-    """Raw /usage_stats/api_usage_stats payload (MASTER key required).
-
-    For debugging exactly what Apollo returns for an account, so we can wire the
-    real 'remaining' figure. Raises ApolloError on failure (e.g. 403 for a
-    non-master key)."""
+    Returns Apollo's /usage_stats/api_usage_stats payload: a map keyed by a
+    stringified ["api/v1/<resource>", "<action>"] pair, each value carrying
+    `minute`/`hour`/`day` windows with `limit`, `consumed`, and `left_over`.
+    This reports API CALL quotas, not credit balance — Apollo doesn't expose a
+    remaining credit balance over the API. Raises ApolloError on failure (e.g.
+    a 403 for a non-master key)."""
     return _request("POST", "/usage_stats/api_usage_stats", api_key)
-
-
-def credits_consumed_this_cycle(api_key: str) -> int | None:
-    """Total Apollo credits consumed in the current billing cycle, or None.
-
-    Hits /usage_stats/api_usage_stats, which requires a MASTER API key — an
-    ordinary key gets a 403, and we return None so usage tracking falls back to
-    the cost model. Also returns None if the payload has no recognizable
-    consumed-credits field. Never raises into the caller.
-    """
-    try:
-        payload = _request("POST", "/usage_stats/api_usage_stats", api_key)
-    except ApolloError:
-        return None
-    return _scan_consumed_credits(payload)
 
 
 def organization_enrich(domain: str, api_key: str) -> dict[str, Any] | None:

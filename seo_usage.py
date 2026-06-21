@@ -9,11 +9,15 @@ provides the plumbing:
   * Semrush exposes a free units-balance endpoint, so its numbers are exact
     (consumed = before - after, remaining = after). A cache hit makes no API
     call, so the delta is correctly 0.
-  * Apollo only exposes per-account usage via a MASTER-key-only endpoint. We
-    auto-detect: if it answers, we use the real billing-cycle credit delta;
-    if it 403s (ordinary key), we fall back to a known-cost model (each
-    billable Apollo call reports its credit cost) plus a session running
-    total, and remember not to retry the endpoint this session.
+  * Apollo does NOT expose a remaining credit balance over its API (that lives
+    only in the dashboard). So "consumed" comes from a known-cost model (each
+    billable Apollo call reports its credit cost: 1 per enrich/search/match;
+    people_search is free) plus a session running total. For "remaining" we use
+    the MASTER-key /usage_stats endpoint, which reports per-endpoint API CALL
+    quotas (left_over/limit per minute/hour/day) — the one real depleting
+    allowance Apollo exposes. We snapshot it before/after to show the live
+    quota for the endpoints a request actually touched. If the endpoint 403s
+    (ordinary key) we skip it and remember not to retry this session.
   * Claude is pay-as-you-go (no fixed allowance), so we report tokens consumed
     this request and a session total, but no "remaining".
   * HubSpot / Google are rate-limited, not credit-limited — we report call
@@ -27,6 +31,7 @@ tracker is active, so the clients stay usable outside a tracked request.
 from __future__ import annotations
 
 import contextvars
+import json
 from typing import Any
 
 import streamlit as st
@@ -92,12 +97,13 @@ def _semrush_balance(api_key: str) -> int | None:
         return None
 
 
-def _apollo_cycle_credits(api_key: str) -> int | None:
-    """Total Apollo credits consumed this billing cycle (master key only).
+def _apollo_usage_snapshot(api_key: str) -> dict | None:
+    """Apollo's per-endpoint API call-quota map, or None if unavailable.
 
-    Returns None when the endpoint is unavailable (ordinary key → 403, or any
-    other error). Caches a negative result in session state so we don't pay the
-    latency of re-probing a non-master key on every request.
+    Returns None when the master-key /usage_stats endpoint can't be read
+    (ordinary key → 403, or any error). Caches a negative result in session
+    state so we don't pay the latency of re-probing a non-master key on every
+    request.
     """
     supported = st.session_state.get(_APOLLO_USAGE_SUPPORTED_KEY)
     if supported is False:
@@ -105,13 +111,22 @@ def _apollo_cycle_credits(api_key: str) -> int | None:
     try:
         import seo_apollo
 
-        consumed = seo_apollo.credits_consumed_this_cycle(api_key)
+        snapshot = seo_apollo.api_usage_stats(api_key)
     except Exception:
-        consumed = None
-    # Distinguish "endpoint works" from "endpoint unavailable": a successful
-    # call returns an int (possibly 0); an unavailable one returns None.
-    st.session_state[_APOLLO_USAGE_SUPPORTED_KEY] = consumed is not None
-    return consumed
+        snapshot = None
+    st.session_state[_APOLLO_USAGE_SUPPORTED_KEY] = isinstance(snapshot, dict)
+    return snapshot if isinstance(snapshot, dict) else None
+
+
+def _apollo_endpoint_label(raw_key: str) -> str:
+    """Turn an Apollo usage key like '["api/v1/people", "match"]' into the
+    compact 'people/match'. Falls back to the raw key on any parse failure."""
+    try:
+        parts = json.loads(raw_key)
+        resource = str(parts[0]).replace("api/v1/", "")
+        return f"{resource}/{parts[1]}"
+    except Exception:
+        return raw_key
 
 
 # ── Formatting helpers ───────────────────────────────────────────────────────
@@ -165,12 +180,12 @@ class UsageTracker:
         self._semrush_before: int | None = None
         self._semrush_after: int | None = None
 
-        # Apollo: real cycle-credit balance (master key) if available …
-        self._apollo_before: int | None = None
-        self._apollo_after: int | None = None
-        self._apollo_real = False
-        # … otherwise the cost-model estimate accumulated from billable calls.
+        # Apollo: credits consumed come from the cost model (Apollo has no
+        # credit-balance API). The master-key usage snapshots give live API
+        # call-quota "remaining" for the endpoints this request touched.
         self._apollo_estimate = 0
+        self._apollo_usage_before: dict | None = None
+        self._apollo_usage_after: dict | None = None
 
         # Claude tokens (this request).
         self._claude_in = 0
@@ -190,7 +205,7 @@ class UsageTracker:
         if self._semrush_key:
             self._semrush_before = _semrush_balance(self._semrush_key)
         if self._apollo_key:
-            self._apollo_before = _apollo_cycle_credits(self._apollo_key)
+            self._apollo_usage_before = _apollo_usage_snapshot(self._apollo_key)
         return self
 
     def finish(self) -> "UsageTracker":
@@ -199,9 +214,8 @@ class UsageTracker:
         self._finished = True
         if self._semrush_key:
             self._semrush_after = _semrush_balance(self._semrush_key)
-        if self._apollo_key and self._apollo_before is not None:
-            self._apollo_after = _apollo_cycle_credits(self._apollo_key)
-            self._apollo_real = self._apollo_after is not None
+        if self._apollo_key and self._apollo_usage_before is not None:
+            self._apollo_usage_after = _apollo_usage_snapshot(self._apollo_key)
         if self._token is not None:
             _active.reset(self._token)
             self._token = None
@@ -227,9 +241,47 @@ class UsageTracker:
 
     @property
     def apollo_consumed(self) -> int:
-        if self._apollo_real and self._apollo_before is not None and self._apollo_after is not None:
-            return max(0, self._apollo_after - self._apollo_before)
+        # Apollo has no credit-balance API, so consumed is the cost model.
         return self._apollo_estimate
+
+    def _apollo_quota_segments(self) -> list[str]:
+        """For each Apollo endpoint whose call count rose this request, the live
+        remaining quota in its tightest (closest-to-exhaustion) window."""
+        after = self._apollo_usage_after
+        if not after:
+            return []
+        before = self._apollo_usage_before or {}
+        out: list[str] = []
+        for raw_key, windows in after.items():
+            if not isinstance(windows, dict):
+                continue
+            before_windows = before.get(raw_key) or {}
+            # Did this endpoint get called during the request?
+            touched = any(
+                isinstance(w, dict)
+                and isinstance(before_windows.get(name), dict)
+                and (w.get("consumed") or 0) > (before_windows[name].get("consumed") or 0)
+                for name, w in windows.items()
+            )
+            if not touched:
+                continue
+            # Show the window with the least head-room left.
+            tightest = min(
+                (w for w in windows.values() if isinstance(w, dict) and "left_over" in w),
+                key=lambda w: w.get("left_over", 0),
+                default=None,
+            )
+            if tightest is None:
+                continue
+            window_name = next(
+                (n for n, w in windows.items() if w is tightest), "window"
+            )
+            out.append(
+                f"{_apollo_endpoint_label(raw_key)}: "
+                f"{_n(tightest.get('left_over'))}/{_n(tightest.get('limit'))} "
+                f"calls left/{window_name}"
+            )
+        return out
 
     @property
     def claude_tokens(self) -> int:
@@ -267,20 +319,20 @@ class UsageTracker:
 
         if self._apollo_key:
             used = _n(self.apollo_consumed)
-            if self._apollo_real:
-                # Real billing-cycle figures from the master-key endpoint.
-                segs.append(
-                    f"**Apollo** {used} credits used · "
-                    f"{_n(self._apollo_after)} used this billing cycle"
-                )
+            session_total = totals.get("apollo_credits", 0)
+            est = "" if self.apollo_consumed == 0 else " (cost est.)"
+            seg = (
+                f"**Apollo** {used} credits used{est} · "
+                f"{_n(session_total)} this session"
+            )
+            quota = self._apollo_quota_segments()
+            if quota:
+                seg += " · " + "; ".join(quota)
             else:
-                session_total = totals.get("apollo_credits", 0)
-                est = "" if self.apollo_consumed == 0 else " (est.)"
-                segs.append(
-                    f"**Apollo** {used} credits used{est} · "
-                    f"{_n(session_total)} this session "
-                    "(live balance needs a master API key)"
-                )
+                # No master key (or nothing billable touched) — be explicit that
+                # the credit balance isn't available via Apollo's API.
+                seg += " · credit balance: Apollo dashboard only"
+            segs.append(seg)
 
         if self.claude_tokens:
             sess = totals.get("claude_tokens", 0)

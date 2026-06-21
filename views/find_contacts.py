@@ -18,7 +18,6 @@ from seo_apollo import (
     ApolloError,
     people_search,
     person_match,
-    raw_usage_stats,
 )
 import seo_usage
 from seo_claude import ClaudeError, expand_job_function
@@ -215,21 +214,6 @@ def render() -> None:
             "Streamlit Cloud, or to `.streamlit/secrets.toml` locally."
         )
         st.stop()
-
-    # TEMPORARY debug: dump the raw Apollo usage_stats payload so we can see what
-    # a master key actually returns and wire the real "remaining" figure. Safe to
-    # remove once that's done — the response carries rate-limit data, not secrets.
-    with st.expander("🔧 Apollo API usage (debug — temporary)"):
-        st.caption(
-            "Click to fetch the raw /usage_stats/api_usage_stats response "
-            "(requires a master API key). Paste it back to finalize Apollo usage "
-            "reporting."
-        )
-        if st.button("Fetch Apollo usage stats"):
-            try:
-                st.json(raw_usage_stats(api_key))
-            except ApolloError as e:
-                st.error(str(e))
 
     # Persist the user's per-page preference across searches so changing it
     # after a search sticks.
