@@ -98,6 +98,15 @@ def _scan_consumed_credits(obj: Any) -> int | None:
     return total
 
 
+def raw_usage_stats(api_key: str) -> dict[str, Any]:
+    """Raw /usage_stats/api_usage_stats payload (MASTER key required).
+
+    For debugging exactly what Apollo returns for an account, so we can wire the
+    real 'remaining' figure. Raises ApolloError on failure (e.g. 403 for a
+    non-master key)."""
+    return _request("POST", "/usage_stats/api_usage_stats", api_key)
+
+
 def credits_consumed_this_cycle(api_key: str) -> int | None:
     """Total Apollo credits consumed in the current billing cycle, or None.
 
