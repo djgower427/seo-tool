@@ -1,8 +1,10 @@
-"""Magic Eight Ball — ask a free-text question, Claude answers from app data.
+"""Magic Eight Ball — a chat where Claude answers from the app's data sources.
 
-Claude is given a toolbox wired to the app's data sources (Apollo, Semrush),
-picks the relevant one(s), retrieves the data, and returns a brief answer. See
-seo_agent.answer_question for the tool-use loop.
+Claude is given a toolbox wired to the app's data sources (Apollo, Semrush,
+HubSpot, Google), picks the relevant one(s), retrieves the data, and answers.
+The conversation is kept in session state and fed back into the agent, so
+follow-up questions have the full context of earlier answers and tool results.
+See seo_agent.answer_question for the tool-use loop.
 """
 
 from __future__ import annotations
@@ -21,6 +23,21 @@ from seo_keys import (
     get_hubspot_token,
     get_semrush_key,
 )
+
+
+def _render_answer(turn: dict) -> None:
+    """Render one assistant turn: usage line first, then the answer and the
+    sources it consulted."""
+    if turn.get("usage_md"):
+        st.info(turn["usage_md"])
+    # Escape '$' so Streamlit's markdown doesn't treat dollar amounts as LaTeX
+    # math (which silently strips spaces and stacks characters).
+    st.markdown(turn["answer"].replace("$", "\\$"))
+    tools_used = turn.get("tools_used") or []
+    if tools_used:
+        with st.expander(f"Sources consulted ({len(tools_used)})"):
+            for t in tools_used:
+                st.markdown(f"- `{t['name']}` — {t['input']}")
 
 
 def render() -> None:
@@ -68,30 +85,48 @@ def render() -> None:
             "until one is added."
         )
 
-    with st.form("magic-eight-ball-form"):
-        question = st.text_input(
-            "Your question",
-            label_visibility="collapsed",
-            placeholder="e.g. How much organic traffic does stripe.com get?",
-        )
-        submitted = st.form_submit_button("Submit", type="primary")
+    # ── Chat state ───────────────────────────────────────────────────────────
+    # _meb_chat holds display turns ({role, content/answer, usage_md, tools_used});
+    # _meb_messages is the Anthropic-format conversation fed back to the agent so
+    # follow-ups carry the full context of earlier answers and tool results.
+    if "_meb_chat" not in st.session_state:
+        st.session_state["_meb_chat"] = []
+    if "_meb_messages" not in st.session_state:
+        st.session_state["_meb_messages"] = []
 
-    if submitted:
-        if not question.strip():
-            st.error("Type a question first.")
-            return
-        # The agent may touch several allowances in one question: Semrush units
-        # and Apollo credits (real balance deltas), Claude tokens (recorded in
-        # the agent loop), plus rate-limited HubSpot/Google calls. Measure them
-        # around the whole run and stash the summary so it survives reruns.
-        usage_tracker = seo_usage.start(
-            semrush_key=semrush_key, apollo_key=apollo_key
-        )
+    if st.session_state["_meb_chat"]:
+        if st.button("🗑️ Clear chat"):
+            st.session_state["_meb_chat"] = []
+            st.session_state["_meb_messages"] = []
+            st.rerun()
+
+    # Replay the conversation so far.
+    for turn in st.session_state["_meb_chat"]:
+        with st.chat_message(turn["role"]):
+            if turn["role"] == "assistant":
+                _render_answer(turn)
+            else:
+                st.markdown(turn["content"])
+
+    prompt = st.chat_input("Ask a question — or a follow-up on the last answer…")
+    if not prompt or not prompt.strip():
+        return
+    prompt = prompt.strip()
+
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    # The agent may touch several allowances in one turn: Semrush units and
+    # Apollo credits (balance deltas), Claude tokens (recorded in the agent
+    # loop), plus rate-limited HubSpot/Google calls. Measure them around the run.
+    usage_tracker = seo_usage.start(semrush_key=semrush_key, apollo_key=apollo_key)
+    with st.chat_message("assistant"):
         with st.spinner("Consulting the eight ball…"):
             try:
                 result = answer_question(
-                    question.strip(),
+                    prompt,
                     anthropic_key=anthropic_key,
+                    history=st.session_state["_meb_messages"],
                     apollo_key=apollo_key,
                     semrush_key=semrush_key,
                     hubspot_token=hubspot_token,
@@ -111,33 +146,18 @@ def render() -> None:
             elif name.startswith("gsc") or name.startswith("google_ads"):
                 seo_usage.record_call("google")
         usage_tracker.finish()
-        st.session_state["_meb_result"] = {
-            "question": question.strip(),
+        assistant_turn = {
+            "role": "assistant",
+            "answer": result["answer"],
             "usage_md": usage_tracker.summary_md(),
-            **result,
+            "tools_used": result.get("tools_used") or [],
         }
+        _render_answer(assistant_turn)
 
-    result = st.session_state.get("_meb_result")
-    if not result:
-        return
-
-    # Escape '$' so Streamlit's markdown doesn't treat dollar amounts as LaTeX
-    # math (which silently strips spaces and stacks characters).
-    safe_answer = result["answer"].replace("$", "\\$")
-
-    usage_md = result.get("usage_md")
-    if usage_md:
-        st.info(usage_md)
-
-    st.markdown(f"**Q:** {result['question']}")
-    st.markdown("#### 🎱 Answer")
-    st.markdown(safe_answer)
-
-    tools_used = result.get("tools_used") or []
-    if tools_used:
-        with st.expander(f"Sources consulted ({len(tools_used)})"):
-            for t in tools_used:
-                st.markdown(f"- `{t['name']}` — {t['input']}")
+    # Persist the agent conversation and the display log for follow-ups/reruns.
+    st.session_state["_meb_messages"] = result["messages"]
+    st.session_state["_meb_chat"].append({"role": "user", "content": prompt})
+    st.session_state["_meb_chat"].append(assistant_turn)
 
 
 render()

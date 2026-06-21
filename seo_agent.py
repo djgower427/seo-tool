@@ -916,6 +916,7 @@ def answer_question(
     question: str,
     *,
     anthropic_key: str,
+    history: list[dict[str, Any]] | None = None,
     apollo_key: str | None = None,
     semrush_key: str | None = None,
     hubspot_token: str | None = None,
@@ -925,9 +926,16 @@ def answer_question(
 ) -> dict[str, Any]:
     """Answer a free-text question by letting Claude call the app's data tools.
 
-    Returns {"answer": str, "tools_used": [{"name", "input"}, ...]}. Raises
-    ClaudeError on Anthropic API errors. Individual tool failures are fed back
-    to the model as error results rather than raised, so it can adapt.
+    Pass `history` (the `messages` returned by a previous call) to continue a
+    conversation — Claude then has the earlier questions, tool calls, and
+    results as context for a follow-up. The new question is appended as a user
+    turn and the final answer as an assistant turn.
+
+    Returns {"answer": str, "tools_used": [{"name", "input"}, ...], "messages":
+    [...]}, where `messages` is the full updated conversation to feed back in as
+    `history` next time. `tools_used` covers only this turn. Raises ClaudeError
+    on Anthropic API errors. Individual tool failures are fed back to the model
+    as error results rather than raised, so it can adapt.
     """
     client = anthropic.Anthropic(api_key=anthropic_key)
     tools, handlers = _build_toolbox(
@@ -938,7 +946,8 @@ def answer_question(
     # year, last 30 days) itself.
     system = f"{_SYSTEM}\n\nToday's date is {datetime.now().date().isoformat()}."
 
-    messages: list[dict[str, Any]] = [{"role": "user", "content": question}]
+    messages: list[dict[str, Any]] = list(history) if history else []
+    messages.append({"role": "user", "content": question})
     tools_used: list[dict[str, Any]] = []
 
     for _ in range(_MAX_STEPS):
@@ -967,9 +976,12 @@ def answer_question(
             answer = "".join(
                 b.text for b in response.content if b.type == "text"
             ).strip()
+            # Record the final assistant turn so a follow-up call has full context.
+            messages.append({"role": "assistant", "content": response.content})
             return {
                 "answer": answer or "(no answer produced)",
                 "tools_used": tools_used,
+                "messages": messages,
             }
 
         # Execute the requested tools and feed results back.
@@ -1010,10 +1022,15 @@ def answer_question(
                 )
         messages.append({"role": "user", "content": results})
 
+    fallback = (
+        "I couldn't reach a final answer within the step limit. Try a more "
+        "specific question."
+    )
+    # Close the conversation on an assistant turn so history stays valid (the
+    # loop left it ending on a tool_result user turn).
+    messages.append({"role": "assistant", "content": fallback})
     return {
-        "answer": (
-            "I couldn't reach a final answer within the step limit. Try a more "
-            "specific question."
-        ),
+        "answer": fallback,
         "tools_used": tools_used,
+        "messages": messages,
     }
