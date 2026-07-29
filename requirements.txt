@@ -6,3 +6,4 @@ streamlit>=1.36.0
 markdown>=3.5
 fpdf2>=2.7.5
 pandas>=2.0.0
+openpyxl>=3.1.0

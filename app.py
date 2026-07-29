@@ -47,6 +47,11 @@ nav = st.navigation(
             title="Magic Eight Ball",
             icon="🎱",
         ),
+        st.Page(
+            "views/budget_tracking.py",
+            title="Budget Tracking & Reconciliation",
+            icon="💰",
+        ),
     ]
 )
 nav.run()

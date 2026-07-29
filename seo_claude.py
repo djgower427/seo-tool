@@ -442,3 +442,334 @@ def summarize_offerings(domain: str, page_text: str, api_key: str) -> str:
     if not text:
         raise ClaudeError("Claude returned an empty offerings summary")
     return text
+
+
+# Reading a messy spreadsheet's layout is real reasoning (find the header row
+# among title rows, spot monthly columns to sum, subtotal rows to skip), so the
+# infrequent layout + reconcile calls both use the strongest model.
+_LAYOUT_MODEL = "claude-opus-4-8"
+
+_ONE_SHEET_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "header_row": {
+            "type": "integer",
+            "description": "0-based index (into the previewed rows) of the row holding column headers.",
+        },
+        "category_columns": {
+            "type": "array",
+            "items": {"type": "integer"},
+            "description": (
+                "0-based column indices whose values name the budget line / "
+                "category. Usually one; more when the category is split across "
+                "columns (e.g. Group + Line item)."
+            ),
+        },
+        "amount_columns": {
+            "type": "array",
+            "items": {"type": "integer"},
+            "description": (
+                "0-based column indices holding the money amount, to be SUMMED "
+                "per row. If the sheet has monthly columns (Jan…Dec), list them "
+                "all. If it ALSO has an annual/total column that already sums "
+                "them, list ONLY that one column instead — never both, or the "
+                "total double-counts."
+            ),
+        },
+        "exclude_patterns": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Case-insensitive substrings identifying subtotal/total rows to "
+                "drop by their category label (e.g. 'total', 'subtotal', 'sum'). "
+                "Empty if there are none."
+            ),
+        },
+        "note": {
+            "type": "string",
+            "description": "One short sentence on how this sheet is laid out.",
+        },
+    },
+    "required": [
+        "header_row", "category_columns", "amount_columns", "exclude_patterns",
+        "note",
+    ],
+    "additionalProperties": False,
+}
+
+_LAYOUTS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "planned": _ONE_SHEET_SCHEMA,
+        "actual": _ONE_SHEET_SCHEMA,
+    },
+    "required": ["planned", "actual"],
+    "additionalProperties": False,
+}
+
+
+def _coerce_sheet_layout(data: Any) -> dict[str, Any]:
+    """Defensively normalize one sheet-layout object from Claude."""
+    d = data if isinstance(data, dict) else {}
+
+    def _int_list(v: Any) -> list[int]:
+        out: list[int] = []
+        for x in v or []:
+            try:
+                out.append(int(x))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    try:
+        header_row = int(d.get("header_row") or 0)
+    except (TypeError, ValueError):
+        header_row = 0
+
+    return {
+        "header_row": max(0, header_row),
+        "category_columns": _int_list(d.get("category_columns")),
+        "amount_columns": _int_list(d.get("amount_columns")),
+        "exclude_patterns": [
+            str(p).strip() for p in (d.get("exclude_patterns") or []) if str(p).strip()
+        ],
+        "note": (str(d.get("note") or "")).strip(),
+    }
+
+
+def infer_layouts(
+    planned_preview: list[list[str]],
+    actual_preview: list[list[str]],
+    api_key: str,
+) -> dict[str, dict[str, Any]]:
+    """Read how two spreadsheets are laid out so we can roll them up correctly.
+
+    Each preview is a list of rows (outer index = row, inner index = 0-based
+    column) sampled from the top of the raw sheet. Claude locates the header row
+    and the category/amount columns for each — coping with title rows, monthly
+    columns that must be summed, and subtotal rows to skip.
+
+    Returns {"planned": layout, "actual": layout}, each layout a dict with
+    header_row (int), category_columns / amount_columns (list[int] of column
+    indices), exclude_patterns (list[str]), note (str). Raises ClaudeError on
+    API errors or a malformed response.
+    """
+    client = anthropic.Anthropic(api_key=api_key)
+
+    prompt = (
+        "Two spreadsheets were uploaded to reconcile a marketing budget: a "
+        "PLANNED BUDGET and a feed of ACTUAL SPEND from finance. Each is shown "
+        "as a grid of the top rows — the outer list is rows, the inner list is "
+        "columns (0-based, left to right). They are laid out differently and may "
+        "have title/blank rows above the real header.\n\n"
+        "For EACH sheet, determine: which row index is the column header; which "
+        "column index(es) hold the category / budget line; which column "
+        "index(es) hold the money amount to sum; and any substring that marks "
+        "subtotal/total rows to exclude.\n\n"
+        "Watch for: a budget spread across monthly columns (sum them, OR use a "
+        "single annual-total column if present — never both); category labels "
+        "split across columns; and total rows that would double-count.\n\n"
+        f"PLANNED BUDGET grid:\n{json.dumps(planned_preview)}\n\n"
+        f"ACTUAL SPEND grid:\n{json.dumps(actual_preview)}"
+    )
+
+    try:
+        response = client.messages.create(
+            model=_LAYOUT_MODEL,
+            max_tokens=1500,
+            messages=[{"role": "user", "content": prompt}],
+            output_config={
+                "format": {"type": "json_schema", "schema": _LAYOUTS_SCHEMA}
+            },
+        )
+    except anthropic.AuthenticationError:
+        raise ClaudeError(
+            "Anthropic rejected the API key — check ANTHROPIC_API_KEY"
+        ) from None
+    except anthropic.RateLimitError:
+        raise ClaudeError(
+            "Anthropic rate limit hit — wait a minute and retry"
+        ) from None
+    except anthropic.APIError as e:
+        raise ClaudeError(f"Anthropic API error: {e}") from None
+
+    seo_usage.record_claude(_LAYOUT_MODEL, response.usage)
+
+    try:
+        text = next(b.text for b in response.content if b.type == "text")
+        data = json.loads(text)
+    except (StopIteration, json.JSONDecodeError, AttributeError) as e:
+        raise ClaudeError(f"could not parse Claude response: {e}") from None
+
+    return {
+        "planned": _coerce_sheet_layout(data.get("planned")),
+        "actual": _coerce_sheet_layout(data.get("actual")),
+    }
+
+
+# Reconciliation is judgment-heavy (semantic category matching + prose flags),
+# and the call is infrequent on a small payload, so use the strongest model.
+_RECONCILE_MODEL = "claude-opus-4-8"
+
+_RECONCILE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "categories": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "description": "Canonical category name for this reconciled line.",
+                    },
+                    "planned": {
+                        "type": "number",
+                        "description": "Planned budget for this category (0 if unbudgeted).",
+                    },
+                    "actual": {
+                        "type": "number",
+                        "description": "Actual spend for this category (0 if nothing spent).",
+                    },
+                    "variance": {
+                        "type": "number",
+                        "description": "actual - planned. Positive = overspend, negative = underspend.",
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["over", "under", "on_track", "unbudgeted", "unspent"],
+                        "description": (
+                            "over/under/on_track for budgeted categories; "
+                            "unbudgeted = spend with no matching budget line; "
+                            "unspent = budget line with no spend."
+                        ),
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": "Short flag/explanation, or empty when unremarkable.",
+                    },
+                },
+                "required": ["category", "planned", "actual", "variance", "status", "note"],
+                "additionalProperties": False,
+            },
+        },
+        "summary": {
+            "type": "string",
+            "description": "2-4 sentences on overall over/under-spend against plan.",
+        },
+        "flags": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Notable inconsistencies to call out (biggest/most concerning first).",
+        },
+    },
+    "required": ["categories", "summary", "flags"],
+    "additionalProperties": False,
+}
+
+
+def reconcile_budget(
+    planned: dict[str, float],
+    actual: dict[str, float],
+    api_key: str,
+    *,
+    currency: str = "USD",
+) -> dict[str, Any]:
+    """Reconcile a planned-budget rollup against an actual-spend rollup.
+
+    `planned` and `actual` are {category: total} maps produced by
+    seo_budget.rollup — already summed per category, so Claude only has to match
+    categories across the two sheets (their names rarely align — "Google Ads" vs
+    "Paid Search — Google"), compute per-category variance, classify over/under/
+    unbudgeted/unspent, and surface inconsistencies.
+
+    Returns {"categories": [...], "summary": str, "flags": [str]} — see
+    _RECONCILE_SCHEMA. Raises ClaudeError on API errors or a malformed response.
+    """
+    client = anthropic.Anthropic(api_key=api_key)
+
+    prompt = (
+        "You are reconciling a marketing PLANNED BUDGET against ACTUAL SPEND "
+        "pulled from finance. Each is a JSON map of category -> total (already "
+        f"summed; amounts in {currency}).\n\n"
+        f"PLANNED BUDGET:\n{json.dumps(planned, indent=2)}\n\n"
+        f"ACTUAL SPEND:\n{json.dumps(actual, indent=2)}\n\n"
+        "Produce a reconciliation:\n"
+        "- Match categories across the two maps by MEANING, not exact string — "
+        "e.g. 'Google Ads' in one and 'Paid Search — Google' in the other are "
+        "the same line; merge them. Keep genuinely distinct categories separate.\n"
+        "- For each reconciled category emit planned, actual, and "
+        "variance = actual - planned (positive = OVERSPEND, negative = underspend).\n"
+        "- status: 'over' if actual materially exceeds planned, 'under' if "
+        "materially below, 'on_track' if close; 'unbudgeted' if there's spend "
+        "but no matching budget line (planned = 0); 'unspent' if there's a "
+        "budget line but no spend (actual = 0).\n"
+        "- note: a short flag when useful (e.g. 'over by 38%'), else empty.\n"
+        "- Include EVERY category that appears in either map exactly once.\n"
+        "- summary: 2-4 sentences on whether we're over or under overall and the "
+        "biggest drivers.\n"
+        "- flags: the most concerning inconsistencies first — large overspends, "
+        "spend in unbudgeted categories, budgeted lines with zero spend. Empty "
+        "list if nothing stands out.\n"
+        "Report amounts as plain numbers (no currency symbols or commas)."
+    )
+
+    try:
+        response = client.messages.create(
+            model=_RECONCILE_MODEL,
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+            output_config={
+                "format": {"type": "json_schema", "schema": _RECONCILE_SCHEMA}
+            },
+        )
+    except anthropic.AuthenticationError:
+        raise ClaudeError(
+            "Anthropic rejected the API key — check ANTHROPIC_API_KEY"
+        ) from None
+    except anthropic.RateLimitError:
+        raise ClaudeError(
+            "Anthropic rate limit hit — wait a minute and retry"
+        ) from None
+    except anthropic.APIError as e:
+        raise ClaudeError(f"Anthropic API error: {e}") from None
+
+    seo_usage.record_claude(_RECONCILE_MODEL, response.usage)
+
+    try:
+        text = next(b.text for b in response.content if b.type == "text")
+        data = json.loads(text)
+    except (StopIteration, json.JSONDecodeError, AttributeError) as e:
+        raise ClaudeError(f"could not parse Claude response: {e}") from None
+
+    def _num(v: Any) -> float:
+        try:
+            return round(float(v), 2)
+        except (TypeError, ValueError):
+            return 0.0
+
+    categories = []
+    for c in data.get("categories") or []:
+        if not isinstance(c, dict):
+            continue
+        planned_v = _num(c.get("planned"))
+        actual_v = _num(c.get("actual"))
+        categories.append(
+            {
+                "category": (str(c.get("category") or "")).strip() or "(unnamed)",
+                "planned": planned_v,
+                "actual": actual_v,
+                # Trust our own arithmetic for variance over the model's.
+                "variance": round(actual_v - planned_v, 2),
+                "status": (str(c.get("status") or "")).strip() or "on_track",
+                "note": (str(c.get("note") or "")).strip(),
+            }
+        )
+
+    flags = [str(f).strip() for f in (data.get("flags") or []) if str(f).strip()]
+
+    return {
+        "categories": categories,
+        "summary": (str(data.get("summary") or "")).strip(),
+        "flags": flags,
+    }
