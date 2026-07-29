@@ -89,6 +89,13 @@ def preview_grid(raw: pd.DataFrame, *, head: int = 20, tail: int = 14,
     return {"total_rows": n, "rows": rows}
 
 
+def _as_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def build_frame(raw: pd.DataFrame, header_row: int,
                 first_data_row: int | None = None,
                 last_data_row: int | None = None) -> pd.DataFrame:
@@ -99,14 +106,24 @@ def build_frame(raw: pd.DataFrame, header_row: int,
     service-line summary blocks that sit below the real line items — critical
     because those summary rows often park values inside month columns. Column
     names come from the header row (blanks become column_N; duplicates suffixed).
-    """
-    n_rows = raw.shape[0]
-    header_row = max(0, min(int(header_row), n_rows - 1))
 
-    header = raw.iloc[header_row].tolist()
+    Works on native Python lists rather than vectorized pandas ops so it behaves
+    identically regardless of the installed pandas' default string dtype.
+    """
+    # Pull the grid out as plain Python rows — dtype-agnostic across pandas
+    # versions (arrow-backed strings, object, etc. all normalize the same way).
+    grid = [list(t) for t in raw.itertuples(index=False, name=None)]
+    n_rows = len(grid)
+    n_cols = raw.shape[1]
+    if n_rows == 0 or n_cols == 0:
+        return pd.DataFrame()
+
+    header_row = max(0, min(_as_int(header_row, 0), n_rows - 1))
+    header = grid[header_row]
     cols: list[str] = []
     seen: dict[str, int] = {}
-    for i, h in enumerate(header):
+    for i in range(n_cols):
+        h = header[i] if i < len(header) else ""
         name = str(h).strip() or f"column_{i + 1}"
         if name in seen:
             seen[name] += 1
@@ -115,17 +132,18 @@ def build_frame(raw: pd.DataFrame, header_row: int,
             seen[name] = 0
         cols.append(name)
 
-    start = header_row + 1 if first_data_row is None else int(first_data_row)
+    start = header_row + 1 if first_data_row is None else _as_int(first_data_row, header_row + 1)
     start = max(header_row + 1, min(start, n_rows))
-    end = n_rows if last_data_row is None else int(last_data_row) + 1
+    end = n_rows if last_data_row is None else _as_int(last_data_row, n_rows - 1) + 1
     end = min(n_rows, max(end, start))  # exclusive; ≥ start so never empty-by-swap
     if end <= start:
         end = n_rows  # bad range from the model → fall back to all remaining rows
 
-    data = raw.iloc[start:end].copy()
-    data.columns = cols
-    data = data.loc[~(data == "").all(axis=1)]  # drop fully-blank rows
-    return data.reset_index(drop=True)
+    body = [
+        row for row in grid[start:end]
+        if any(str(c).strip() for c in row)  # drop fully-blank rows
+    ]
+    return pd.DataFrame(body, columns=cols).astype(str).reset_index(drop=True)
 
 
 _MONTHS = [

@@ -255,14 +255,23 @@ def render() -> None:
         return
 
     pl_layout, ac_layout = layouts["planned"], layouts["actual"]
-    planned_df = seo_budget.build_frame(
-        planned_raw, pl_layout["header_row"],
-        pl_layout.get("first_data_row"), pl_layout.get("last_data_row"),
-    )
-    actual_df = seo_budget.build_frame(
-        actual_raw, ac_layout["header_row"],
-        ac_layout.get("first_data_row"), ac_layout.get("last_data_row"),
-    )
+    try:
+        planned_df = seo_budget.build_frame(
+            planned_raw, pl_layout.get("header_row", 0),
+            pl_layout.get("first_data_row"), pl_layout.get("last_data_row"),
+        )
+        actual_df = seo_budget.build_frame(
+            actual_raw, ac_layout.get("header_row", 0),
+            ac_layout.get("first_data_row"), ac_layout.get("last_data_row"),
+        )
+    except Exception as e:  # noqa: BLE001 — surface, don't white-screen the app
+        st.error(f"Couldn't structure the sheets after layout detection: {type(e).__name__}: {e}")
+        st.exception(e)  # full traceback (rendered by us, so Cloud won't redact it)
+        if st.button("Clear detected layout and retry"):
+            for k in (_LAYOUTS_KEY, _DETECT_USAGE_KEY):
+                st.session_state.pop(k, None)
+            st.rerun()
+        return
 
     # If both sheets are monthly matrices, default the budget's months to the
     # ones the actuals actually cover — so a 6-month finance feed compares
