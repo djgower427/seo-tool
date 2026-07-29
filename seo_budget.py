@@ -68,22 +68,37 @@ def read_raw(name: str, data: bytes) -> pd.DataFrame:
     return raw.reset_index(drop=True)
 
 
-def preview_grid(raw: pd.DataFrame, *, max_rows: int = 25, max_cols: int = 40,
-                 max_cell: int = 60) -> list[list[str]]:
-    """A compact list-of-rows view of `raw` for Claude, capped in every
-    dimension. Outer index = row, inner index = 0-based column."""
-    out: list[list[str]] = []
-    for _, row in raw.iloc[:max_rows].iterrows():
-        cells = [str(v)[:max_cell] for v in row.tolist()[:max_cols]]
-        out.append(cells)
-    return out
+def preview_grid(raw: pd.DataFrame, *, head: int = 20, tail: int = 14,
+                 max_cols: int = 40, max_cell: int = 60) -> dict[str, Any]:
+    """A compact preview of `raw` for Claude: the first `head` and last `tail`
+    rows, each tagged with its TRUE row index so Claude can point at rows deep
+    in the sheet (e.g. a trailing TOTAL row it must exclude).
+
+    Returns {"total_rows": int, "rows": [[row_index, [cells...]], ...]}. Cells
+    are 0-based columns left to right.
+    """
+    n = raw.shape[0]
+    idxs = list(range(min(head, n)))
+    if n > head:
+        idxs += list(range(max(head, n - tail), n))  # tail, no overlap with head
+
+    rows: list[list[Any]] = []
+    for i in idxs:
+        cells = [str(v)[:max_cell] for v in raw.iloc[i].tolist()[:max_cols]]
+        rows.append([i, cells])
+    return {"total_rows": n, "rows": rows}
 
 
-def build_frame(raw: pd.DataFrame, header_row: int) -> pd.DataFrame:
-    """Turn the raw grid into a real table, using `header_row` as the header.
+def build_frame(raw: pd.DataFrame, header_row: int,
+                first_data_row: int | None = None,
+                last_data_row: int | None = None) -> pd.DataFrame:
+    """Turn the raw grid into a real table, using `header_row` as the header and
+    keeping only the rows in [first_data_row, last_data_row] (inclusive).
 
-    Column names come from that row (blanks become column_N; duplicates get a
-    numeric suffix); the data is everything below it, blank rows dropped.
+    Restricting the row range is how we drop the trailing TOTAL / quarterly /
+    service-line summary blocks that sit below the real line items — critical
+    because those summary rows often park values inside month columns. Column
+    names come from the header row (blanks become column_N; duplicates suffixed).
     """
     n_rows = raw.shape[0]
     header_row = max(0, min(int(header_row), n_rows - 1))
@@ -100,10 +115,40 @@ def build_frame(raw: pd.DataFrame, header_row: int) -> pd.DataFrame:
             seen[name] = 0
         cols.append(name)
 
-    data = raw.iloc[header_row + 1:].copy()
+    start = header_row + 1 if first_data_row is None else int(first_data_row)
+    start = max(header_row + 1, min(start, n_rows))
+    end = n_rows if last_data_row is None else int(last_data_row) + 1
+    end = min(n_rows, max(end, start))  # exclusive; ≥ start so never empty-by-swap
+    if end <= start:
+        end = n_rows  # bad range from the model → fall back to all remaining rows
+
+    data = raw.iloc[start:end].copy()
     data.columns = cols
     data = data.loc[~(data == "").all(axis=1)]  # drop fully-blank rows
     return data.reset_index(drop=True)
+
+
+_MONTHS = [
+    "january", "february", "march", "april", "may", "june", "july", "august",
+    "september", "october", "november", "december",
+]
+
+
+def month_number(label: str) -> int | None:
+    """Map a column label like 'Jan', 'January', '2026-01' to 1-12, or None.
+
+    Used to align a budget's monthly columns with the actuals' coverage so we
+    compare the same months on both sides.
+    """
+    low = str(label).strip().lower()
+    if not low:
+        return None
+    for i, name in enumerate(_MONTHS, start=1):
+        if low.startswith(name[:3]):  # 'jan', 'feb', … catches full + abbreviated
+            return i
+    # Numeric month in an ISO-ish label, e.g. '2026-01' or '01/2026'.
+    m = re.search(r"\b(0?[1-9]|1[0-2])\b", low)
+    return int(m.group()) if m else None
 
 
 def _score_column(col: str, hints: list[str]) -> int:

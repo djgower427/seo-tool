@@ -117,29 +117,54 @@ def _render_result(result: dict) -> None:
 
 
 def _mapping_controls(kind: str, label: str, df: pd.DataFrame, layout: dict,
-                      prefer: str) -> dict:
+                      prefer: str, period_default: list[str] | None) -> dict:
     """Editable column mapping for one sheet, defaulting to Claude's read.
-    Returns {"cat": [cols], "amt": [cols], "excl": [patterns]}."""
+
+    When the sheet is a monthly matrix (period columns detected), the amount
+    control becomes a month picker so you can limit the comparison to the months
+    your actuals cover. Returns {"cat": [cols], "amt": [cols], "excl": [pats]}.
+    """
     cols = list(df.columns)
     note = layout.get("note") or f"header row {layout.get('header_row', 0)}"
     st.markdown(f"**{label}** — {_esc(note)}")
 
+    # Surface the data-row span so a misread trailing-totals block is visible.
+    first = layout.get("first_data_row")
+    last = layout.get("last_data_row")
+    if first is not None and last is not None:
+        st.caption(
+            f"Reading spreadsheet rows {int(first) + 1}–{int(last) + 1} as line "
+            f"items ({len(df)} rows); anything below is treated as summary/totals. "
+            "Re-detect if that's wrong."
+        )
+
     default_cat = _resolve(df, layout.get("category_columns", [])) or [
         seo_budget.guess_category_column(df)
     ]
-    default_amt = _resolve(df, layout.get("amount_columns", [])) or [
-        seo_budget.guess_amount_column(df, prefer=prefer)
-    ]
-
-    c1, c2 = st.columns(2)
-    cat = c1.multiselect(
+    cat = st.multiselect(
         "Category column(s)", cols,
         default=[c for c in default_cat if c in cols], key=f"{kind}_cat",
     )
-    amt = c2.multiselect(
-        "Amount column(s) — summed", cols,
-        default=[c for c in default_amt if c in cols], key=f"{kind}_amt",
-    )
+
+    period_cols = _resolve(df, layout.get("period_columns", []))
+    if period_cols:
+        default_months = period_default if period_default is not None else period_cols
+        amt = st.multiselect(
+            "Months / periods to include",
+            period_cols,
+            default=[c for c in default_months if c in period_cols] or period_cols,
+            key=f"{kind}_amt",
+            help="Pick only the months your actuals cover so the two sides line up.",
+        )
+    else:
+        default_amt = _resolve(df, layout.get("amount_columns", [])) or [
+            seo_budget.guess_amount_column(df, prefer=prefer)
+        ]
+        amt = st.multiselect(
+            "Amount column(s) — summed", cols,
+            default=[c for c in default_amt if c in cols], key=f"{kind}_amt",
+        )
+
     excl = st.text_input(
         "Exclude rows whose category contains (comma-separated)",
         value=", ".join(layout.get("exclude_patterns", [])), key=f"{kind}_excl",
@@ -229,21 +254,51 @@ def render() -> None:
         _show_last()
         return
 
-    planned_df = seo_budget.build_frame(planned_raw, layouts["planned"]["header_row"])
-    actual_df = seo_budget.build_frame(actual_raw, layouts["actual"]["header_row"])
+    pl_layout, ac_layout = layouts["planned"], layouts["actual"]
+    planned_df = seo_budget.build_frame(
+        planned_raw, pl_layout["header_row"],
+        pl_layout.get("first_data_row"), pl_layout.get("last_data_row"),
+    )
+    actual_df = seo_budget.build_frame(
+        actual_raw, ac_layout["header_row"],
+        ac_layout.get("first_data_row"), ac_layout.get("last_data_row"),
+    )
+
+    # If both sheets are monthly matrices, default the budget's months to the
+    # ones the actuals actually cover — so a 6-month finance feed compares
+    # against the same 6 budget months, not the full year.
+    planned_periods = _resolve(planned_df, pl_layout.get("period_columns", []))
+    actual_periods = _resolve(actual_df, ac_layout.get("period_columns", []))
+    planned_month_default = planned_periods
+    if planned_periods and actual_periods:
+        actual_months = {
+            seo_budget.month_number(c) for c in actual_periods
+            if seo_budget.month_number(c)
+        }
+        aligned = [c for c in planned_periods if seo_budget.month_number(c) in actual_months]
+        if aligned:
+            planned_month_default = aligned
 
     # ── Review / adjust the mapping ──────────────────────────────────────────
     with st.expander("How Claude read your sheets — adjust if needed", expanded=True):
         if st.session_state.get(_DETECT_USAGE_KEY):
             st.caption(st.session_state[_DETECT_USAGE_KEY])
+        if planned_periods and actual_periods and planned_month_default != planned_periods:
+            st.caption(
+                "📅 Your actuals look like they cover "
+                f"{len(planned_month_default)} month(s); I've defaulted the budget "
+                "to those months so the totals are comparable. Adjust below if needed."
+            )
         mapping = {
             "planned": _mapping_controls(
-                "planned", "Planned budget", planned_df, layouts["planned"], "budget"
+                "planned", "Planned budget", planned_df, pl_layout, "budget",
+                planned_month_default,
             ),
         }
         st.divider()
         mapping["actual"] = _mapping_controls(
-            "actual", "Actual expenses", actual_df, layouts["actual"], "actual"
+            "actual", "Actual expenses", actual_df, ac_layout, "actual",
+            actual_periods or None,
         )
 
     # ── Stage 2: roll up + reconcile ─────────────────────────────────────────

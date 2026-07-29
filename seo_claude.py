@@ -454,7 +454,20 @@ _ONE_SHEET_SCHEMA = {
     "properties": {
         "header_row": {
             "type": "integer",
-            "description": "0-based index (into the previewed rows) of the row holding column headers.",
+            "description": "0-based index of the row holding column headers.",
+        },
+        "first_data_row": {
+            "type": "integer",
+            "description": "0-based index of the FIRST real line-item row (usually header_row + 1).",
+        },
+        "last_data_row": {
+            "type": "integer",
+            "description": (
+                "0-based index of the LAST real line-item row. Everything below "
+                "it — TOTAL / quarterly / half-year / service-line summary rows "
+                "— must be excluded. These summary rows often park values inside "
+                "month columns, so getting this right is critical."
+            ),
         },
         "category_columns": {
             "type": "array",
@@ -465,24 +478,34 @@ _ONE_SHEET_SCHEMA = {
                 "columns (e.g. Group + Line item)."
             ),
         },
+        "period_columns": {
+            "type": "array",
+            "items": {"type": "integer"},
+            "description": (
+                "When the sheet spreads amounts across time columns (Jan…Dec, "
+                "or weeks/quarters), the 0-based indices of those PERIOD columns "
+                "in chronological order. Do NOT include any Total, Average, or "
+                "summary column here. Empty when the sheet isn't a time matrix."
+            ),
+        },
         "amount_columns": {
             "type": "array",
             "items": {"type": "integer"},
             "description": (
-                "0-based column indices holding the money amount, to be SUMMED "
-                "per row. If the sheet has monthly columns (Jan…Dec), list them "
-                "all. If it ALSO has an annual/total column that already sums "
-                "them, list ONLY that one column instead — never both, or the "
-                "total double-counts."
+                "The money column(s) to sum when the sheet is NOT a time matrix "
+                "— e.g. a single 'Amount' in a transaction feed, or a single "
+                "annual 'Total'. Leave EMPTY when period_columns is populated "
+                "(the periods are the amounts). Never mix period columns with a "
+                "total column here, or it double-counts."
             ),
         },
         "exclude_patterns": {
             "type": "array",
             "items": {"type": "string"},
             "description": (
-                "Case-insensitive substrings identifying subtotal/total rows to "
-                "drop by their category label (e.g. 'total', 'subtotal', 'sum'). "
-                "Empty if there are none."
+                "Case-insensitive substrings identifying any stray subtotal/"
+                "total rows to drop by their category label (e.g. 'total', "
+                "'subtotal'). Empty if there are none."
             ),
         },
         "note": {
@@ -491,8 +514,8 @@ _ONE_SHEET_SCHEMA = {
         },
     },
     "required": [
-        "header_row", "category_columns", "amount_columns", "exclude_patterns",
-        "note",
+        "header_row", "first_data_row", "last_data_row", "category_columns",
+        "period_columns", "amount_columns", "exclude_patterns", "note",
     ],
     "additionalProperties": False,
 }
@@ -521,6 +544,12 @@ def _coerce_sheet_layout(data: Any) -> dict[str, Any]:
                 continue
         return out
 
+    def _opt_int(v: Any) -> int | None:
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
     try:
         header_row = int(d.get("header_row") or 0)
     except (TypeError, ValueError):
@@ -528,7 +557,10 @@ def _coerce_sheet_layout(data: Any) -> dict[str, Any]:
 
     return {
         "header_row": max(0, header_row),
+        "first_data_row": _opt_int(d.get("first_data_row")),
+        "last_data_row": _opt_int(d.get("last_data_row")),
         "category_columns": _int_list(d.get("category_columns")),
+        "period_columns": _int_list(d.get("period_columns")),
         "amount_columns": _int_list(d.get("amount_columns")),
         "exclude_patterns": [
             str(p).strip() for p in (d.get("exclude_patterns") or []) if str(p).strip()
@@ -558,19 +590,31 @@ def infer_layouts(
 
     prompt = (
         "Two spreadsheets were uploaded to reconcile a marketing budget: a "
-        "PLANNED BUDGET and a feed of ACTUAL SPEND from finance. Each is shown "
-        "as a grid of the top rows — the outer list is rows, the inner list is "
-        "columns (0-based, left to right). They are laid out differently and may "
-        "have title/blank rows above the real header.\n\n"
-        "For EACH sheet, determine: which row index is the column header; which "
-        "column index(es) hold the category / budget line; which column "
-        "index(es) hold the money amount to sum; and any substring that marks "
-        "subtotal/total rows to exclude.\n\n"
-        "Watch for: a budget spread across monthly columns (sum them, OR use a "
-        "single annual-total column if present — never both); category labels "
-        "split across columns; and total rows that would double-count.\n\n"
-        f"PLANNED BUDGET grid:\n{json.dumps(planned_preview)}\n\n"
-        f"ACTUAL SPEND grid:\n{json.dumps(actual_preview)}"
+        "PLANNED BUDGET and a feed of ACTUAL SPEND from finance. Each preview is "
+        "an object {total_rows, rows}, where each row is [row_index, [cells…]] — "
+        "row_index is the TRUE 0-based index in the full sheet and cells are "
+        "0-based columns left to right. To keep the preview small you're shown "
+        "the first rows and the last rows; middle rows are omitted but the "
+        "indices are exact, so you can still point at rows near the bottom.\n\n"
+        "For EACH sheet determine:\n"
+        "- header_row: the row index of the column headers (skip any title/blank "
+        "rows above it).\n"
+        "- first_data_row / last_data_row: the row-index span of the REAL line "
+        "items. Crucially, exclude the block of summary rows at the bottom — a "
+        "TOTAL row, quarterly/half-year totals, a service-line breakdown. Those "
+        "summary rows frequently place values inside month columns, so if you "
+        "include them the monthly sums blow up (often to exactly double).\n"
+        "- category_columns: the column(s) naming each line item.\n"
+        "- period_columns: if amounts are spread across time columns (Jan…Dec, "
+        "weeks, quarters), their indices in chronological order — NEVER include "
+        "a Total/Average/summary column among them.\n"
+        "- amount_columns: only for a NON-time-matrix sheet (a single Amount in "
+        "a transaction feed, or a single annual Total). Leave empty when "
+        "period_columns is set.\n"
+        "- exclude_patterns: substrings for any stray total rows within the data "
+        "span.\n\n"
+        f"PLANNED BUDGET preview:\n{json.dumps(planned_preview)}\n\n"
+        f"ACTUAL SPEND preview:\n{json.dumps(actual_preview)}"
     )
 
     try:
